@@ -1,0 +1,2404 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SandBoxEQ</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext x='8' y='13' font-size='14' text-anchor='middle'%3E%F0%9F%AA%B2%3C/text%3E%3C/svg%3E" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // Dark mode configuration
+      tailwind.config = {
+        darkMode: "class",
+      };
+    </script>
+    <style>
+      /* Custom animations */
+      .fade-in {
+        animation: fadeIn 0.5s ease-in;
+      }
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+
+      .slide-up {
+        animation: slideUp 0.3s ease-out;
+      }
+      @keyframes slideUp {
+        from {
+          transform: translateY(20px);
+          opacity: 0;
+        }
+        to {
+          transform: translateY(0);
+          opacity: 1;
+        }
+      }
+
+      /* Progress bar animation */
+      .progress-bar {
+        transition: width 0.3s ease;
+      }
+
+      /* Copy button hover effect */
+      .copy-btn {
+        transition: all 0.2s ease;
+      }
+      .copy-btn:hover {
+        transform: scale(1.05);
+      }
+
+      /* Threat score colors */
+      .threat-high {
+        background: linear-gradient(135deg, #dc2626, #ef4444);
+      }
+      .threat-medium {
+        background: linear-gradient(135deg, #d97706, #f59e0b);
+      }
+      .threat-low {
+        background: linear-gradient(135deg, #0891b2, #06b6d4);
+      }
+      .threat-clean {
+        background: linear-gradient(135deg, #059669, #10b981);
+      }
+
+      /* VS Code-style scrollbars: thin, transparent track, subtle thumb */
+      ::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background-color: rgba(100, 100, 100, 0.4);
+        border: 3px solid transparent;
+        background-clip: padding-box;
+        border-radius: 7px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(100, 100, 100, 0.7);
+      }
+      ::-webkit-scrollbar-corner {
+        background: transparent;
+      }
+      .dark ::-webkit-scrollbar-thumb {
+        background-color: rgba(121, 121, 121, 0.4);
+      }
+      .dark ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(150, 150, 150, 0.7);
+      }
+    </style>
+  </head>
+  <body
+    class="bg-gray-100 dark:bg-gray-900 min-h-screen flex flex-col items-center p-6 transition-colors duration-300"
+  >
+    <!-- Header with Dark Mode Toggle and API Health -->
+    <header class="mb-6 text-center w-full max-w-6xl">
+      <div class="flex justify-between items-center mb-4">
+        <div></div>
+        <!-- Spacer -->
+        <div>
+          <h1 class="text-3xl font-bold text-purple-800 dark:text-purple-300">
+            🪲 SandBoxEQ
+          </h1>
+          <p class="text-purple-600 dark:text-purple-400 text-lg">
+            Enhanced Multi-API Threat Intelligence Scanner
+          </p>
+        </div>
+        <div class="flex gap-2">
+          <!-- API Health Button -->
+          <button
+            onclick="checkAPIHealth()"
+            class="p-2 rounded-lg bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-800 transition-colors"
+            title="Check API Health"
+            id="healthBtn"
+          >
+            <svg
+              class="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+              ></path>
+            </svg>
+          </button>
+
+          <!-- Dark Mode Toggle -->
+          <button
+            onclick="toggleDarkMode()"
+            class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+            id="darkModeBtn"
+          >
+            <svg
+              class="w-5 h-5 dark:hidden"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"
+              ></path>
+            </svg>
+            <svg
+              class="w-5 h-5 hidden dark:block"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"
+              ></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="w-full max-w-6xl">
+      <!-- Enhanced Input Section with Tabs -->
+      <div
+        class="bg-white dark:bg-gray-800 rounded-lg shadow-md mb-6 transition-colors duration-300"
+      >
+        <!-- Tab Navigation -->
+        <div class="border-b border-gray-200 dark:border-gray-700">
+          <nav class="-mb-px flex space-x-8 px-6">
+            <button
+              onclick="switchTab('single')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-purple-500 text-purple-600"
+              data-tab="single"
+            >
+              Single Lookup
+            </button>
+            <button
+              onclick="switchTab('bulk')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              data-tab="bulk"
+            >
+              Bulk Analysis
+            </button>
+            <button
+              onclick="switchTab('sandbox')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              data-tab="sandbox"
+            >
+              Sandbox Upload
+            </button>
+            <button
+              onclick="switchTab('settings')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              data-tab="settings"
+            >
+              Settings
+            </button>
+            <button
+              onclick="switchTab('terminal')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              data-tab="terminal"
+            >
+              Terminal
+            </button>
+            {% if history %}
+            <button
+              onclick="switchTab('history')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              data-tab="history"
+            >
+              History & Bookmarks
+            </button>
+            {% endif %}
+          </nav>
+        </div>
+
+        <!-- Single Lookup Tab -->
+        <div id="single-tab" class="tab-content p-6">
+          <form id="single-lookup-form" action="/lookup" method="POST" class="space-y-4">
+            <div>
+              <label
+                for="file_hash"
+                class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+              >
+                Enter Hash (MD5, SHA1, SHA256) or URL:
+              </label>
+              <div class="relative">
+                <input
+                  type="text"
+                  id="file_hash"
+                  name="file_hash"
+                  required
+                  class="w-full px-3 py-2 pr-10 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
+                  placeholder="e.g., d41d8cd98f00b204e9800998ecf8427e or https://example.com"
+                />
+
+                {% if history %}
+                <!-- History Dropdown Button -->
+                <button
+                  type="button"
+                  onclick="toggleHistoryDropdown()"
+                  class="absolute right-2 top-2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                  title="Recent searches"
+                >
+                  <svg
+                    class="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                    ></path>
+                  </svg>
+                </button>
+
+                <!-- History Dropdown -->
+                <div
+                  id="historyDropdown"
+                  class="hidden absolute z-10 mt-1 w-full bg-white dark:bg-gray-700 shadow-lg max-h-60 rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 overflow-auto"
+                >
+                  {% for item in history %}
+                  <div
+                    class="cursor-pointer px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600"
+                    onclick="selectFromHistory('{{ item.value }}')"
+                  >
+                    <div class="flex justify-between items-center">
+                      <span class="truncate"
+                        >{{ item.value[:50] }}{% if item.value|length > 50
+                        %}...{% endif %}</span
+                      >
+                      <span class="text-xs text-gray-500"
+                        >{{ item.threat_score }}/100</span
+                      >
+                    </div>
+                    <div class="text-xs text-gray-400 mt-1">
+                      {{ item.summary[:80] }}...
+                    </div>
+                  </div>
+                  {% endfor %}
+                </div>
+                {% endif %}
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              class="w-full bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-150 ease-in-out transform hover:scale-105"
+            >
+              🔍 Lookup Hash/URL
+            </button>
+          </form>
+
+          <!-- File upload -> local SHA-256 hash -> lookup. The file itself is
+               never sent anywhere; only the computed hash is submitted via the
+               form above. This control is intentionally NOT inside the form. -->
+          <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+            <div class="flex items-center gap-3 mb-2">
+              <div class="flex-1 border-t border-gray-200 dark:border-gray-700"></div>
+              <span class="text-xs text-gray-400 dark:text-gray-500">or</span>
+              <div class="flex-1 border-t border-gray-200 dark:border-gray-700"></div>
+            </div>
+            <label
+              for="single-file-input"
+              class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+            >
+              Upload a file (hashed locally, file contents are never uploaded):
+            </label>
+            <input
+              id="single-file-input"
+              type="file"
+              onchange="hashFileAndLookup(event)"
+              class="block w-full text-sm text-gray-700 dark:text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-purple-100 dark:file:bg-purple-900 file:text-purple-700 dark:file:text-purple-300 hover:file:bg-purple-200 dark:hover:file:bg-purple-800"
+            />
+            <p id="single-file-status" class="text-xs text-gray-500 dark:text-gray-400 mt-2"></p>
+          </div>
+        </div>
+
+        <!-- Bulk Analysis Tab -->
+        <div id="bulk-tab" class="tab-content p-6 hidden">
+          <div class="space-y-4">
+            <div>
+              <label
+                class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+              >
+                Upload CSV File (columns: hash, url, indicator, value, or ioc)
+              </label>
+              <div class="flex items-center justify-center w-full">
+                <label
+                  for="bulk-file"
+                  class="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 dark:hover:bg-bray-800 dark:bg-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:hover:border-gray-500 dark:hover:bg-gray-600"
+                >
+                  <div
+                    class="flex flex-col items-center justify-center pt-5 pb-6"
+                  >
+                    <svg
+                      class="w-8 h-8 mb-4 text-gray-500 dark:text-gray-400"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                      ></path>
+                    </svg>
+                    <p class="mb-2 text-sm text-gray-500 dark:text-gray-400">
+                      <span class="font-semibold">Click to upload</span> or drag
+                      and drop
+                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      CSV files only
+                    </p>
+                  </div>
+                  <input
+                    id="bulk-file"
+                    type="file"
+                    class="hidden"
+                    accept=".csv"
+                    onchange="uploadBulkFile(event)"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <!-- Bulk Processing Status -->
+            <div id="bulk-status" class="hidden">
+              <div
+                class="bg-blue-50 dark:bg-blue-900 border border-blue-200 dark:border-blue-700 rounded-lg p-4"
+              >
+                <div class="flex items-center justify-between mb-2">
+                  <span
+                    class="text-sm font-medium text-blue-800 dark:text-blue-200"
+                    >Processing...</span
+                  >
+                  <span
+                    id="bulk-progress-text"
+                    class="text-sm text-blue-600 dark:text-blue-300"
+                    >0%</span
+                  >
+                </div>
+                <div
+                  class="w-full bg-blue-200 dark:bg-blue-800 rounded-full h-2"
+                >
+                  <div
+                    id="bulk-progress-bar"
+                    class="bg-blue-600 dark:bg-blue-400 h-2 rounded-full progress-bar"
+                    style="width: 0%"
+                  ></div>
+                </div>
+                <div class="mt-2">
+                  <button
+                    id="download-results-btn"
+                    onclick="downloadResults()"
+                    class="hidden px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    📥 Download Results
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sandbox Upload Tab -->
+        <div id="sandbox-tab" class="tab-content p-6 hidden">
+          <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            Upload a file to be detonated by the sandbox(es) you choose. These are shared community platforms -
+            an uploaded file (and its report) is typically visible to other users of that service too, not just you.
+          </p>
+
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Upload to:</label>
+            <div id="sandbox-service-list" class="grid grid-cols-2 gap-2">
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 p-2 border border-gray-200 dark:border-gray-700 rounded-md cursor-pointer">
+                <input type="checkbox" class="sandbox-service-checkbox" value="virustotal" checked />
+                VirusTotal
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 p-2 border border-gray-200 dark:border-gray-700 rounded-md cursor-pointer">
+                <input type="checkbox" class="sandbox-service-checkbox" value="metadefender" checked />
+                MetaDefender
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 p-2 border border-gray-200 dark:border-gray-700 rounded-md cursor-pointer">
+                <input type="checkbox" class="sandbox-service-checkbox" value="hybrid_analysis" />
+                Hybrid Analysis
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 p-2 border border-gray-200 dark:border-gray-700 rounded-md cursor-pointer">
+                <input type="checkbox" class="sandbox-service-checkbox" value="triage_sandbox" />
+                Triage
+              </label>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-center w-full mb-4">
+            <label
+              for="sandbox-file-input"
+              class="flex flex-col items-center justify-center w-full h-24 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 dark:border-gray-600"
+            >
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                <span class="font-semibold">Click to choose a file</span> to upload for sandbox analysis
+              </p>
+              <input id="sandbox-file-input" type="file" class="hidden" />
+            </label>
+          </div>
+
+          <button
+            type="button"
+            onclick="startSandboxUpload()"
+            class="w-full bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-150 ease-in-out"
+          >
+            ⬆️ Upload &amp; Analyze
+          </button>
+
+          <div id="sandbox-upload-status" class="mt-6 space-y-3 hidden"></div>
+        </div>
+
+        <!-- Settings Tab (API Keys) -->
+        <div id="settings-tab" class="tab-content p-6 hidden">
+          <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            API keys are stored locally in <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">config.env</code> next to the app. Leave a field blank to keep the currently saved key.
+          </p>
+          <div id="settings-keys" class="space-y-4"></div>
+          <button
+            type="button"
+            onclick="saveSettings()"
+            class="mt-6 w-full bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-150 ease-in-out"
+          >
+            💾 Save API Keys
+          </button>
+        </div>
+
+        <!-- Terminal Tab -->
+        <div id="terminal-tab" class="tab-content p-6 hidden">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Live scan output. Certificate details and unknown/not-found results are hidden here.
+            </p>
+            <button
+              type="button"
+              onclick="clearTerminalLog()"
+              class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+            >
+              Clear
+            </button>
+          </div>
+          <div
+            id="terminal-log-output"
+            class="bg-gray-900 dark:bg-black text-green-400 font-mono text-xs rounded-lg p-4 h-96 overflow-y-auto whitespace-pre-wrap"
+          >Waiting for scan output...</div>
+        </div>
+
+        <!-- History & Bookmarks Tab -->
+        {% if history or bookmarks %}
+        <div id="history-tab" class="tab-content p-6 hidden">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Recent History -->
+            {% if history %}
+            <div>
+              <h3
+                class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4"
+              >
+                Recent Searches
+              </h3>
+              <div class="space-y-2 max-h-64 overflow-y-auto">
+                {% for item in history %}
+                <div
+                  class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg"
+                >
+                  <div class="flex-1 min-w-0">
+                    <p
+                      class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
+                    >
+                      {{ item.value[:30] }}{% if item.value|length > 30 %}...{%
+                      endif %}
+                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      {{ item.timestamp[:16] }} • Score: {{ item.threat_score
+                      }}/100
+                    </p>
+                    <p class="text-xs text-gray-600 dark:text-gray-300">
+                      {{ item.summary[:50] }}...
+                    </p>
+                  </div>
+                  <div class="flex space-x-2">
+                    <button
+                      onclick="searchAgain('{{ item.value }}')"
+                      class="copy-btn text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
+                      title="Search again"
+                    >
+                      <svg
+                        class="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                        ></path>
+                      </svg>
+                    </button>
+                    <button
+                      onclick="bookmarkItem('{{ item.type }}', '{{ item.value }}')"
+                      class="copy-btn text-yellow-600 dark:text-yellow-400 hover:text-yellow-800 dark:hover:text-yellow-200"
+                      title="Bookmark"
+                    >
+                      <svg
+                        class="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
+                        ></path>
+                      </svg>
+                    </button>
+                    <button
+                      onclick="copyToClipboard('{{ item.value }}')"
+                      class="copy-btn text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
+                      title="Copy"
+                    >
+                      <svg
+                        class="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                        ></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+            {% endif %}
+
+            <!-- Bookmarks -->
+            {% if bookmarks %}
+            <div>
+              <h3
+                class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4"
+              >
+                Bookmarks
+              </h3>
+              <div class="space-y-2 max-h-64 overflow-y-auto">
+                {% for bookmark in bookmarks %}
+                <div
+                  class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg"
+                >
+                  <div class="flex-1 min-w-0">
+                    <p
+                      class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
+                    >
+                      {{ bookmark.title }}
+                    </p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                      {{ bookmark.value[:40] }}{% if bookmark.value|length > 40
+                      %}...{% endif %}
+                    </p>
+                    {% if bookmark.notes %}
+                    <p class="text-xs text-gray-600 dark:text-gray-300">
+                      {{ bookmark.notes[:50] }}...
+                    </p>
+                    {% endif %}
+                  </div>
+                  <div class="flex space-x-2">
+                    <button
+                      onclick="searchAgain('{{ bookmark.value }}')"
+                      class="copy-btn text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
+                      title="Search"
+                    >
+                      <svg
+                        class="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                        ></path>
+                      </svg>
+                    </button>
+                    <button
+                      onclick="removeBookmark('{{ bookmark.value }}')"
+                      class="copy-btn text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200"
+                      title="Remove"
+                    >
+                      <svg
+                        class="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        ></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Error Display -->
+      {% if error %}
+      <div
+        class="bg-red-100 dark:bg-red-900 border border-red-400 dark:border-red-600 text-red-700 dark:text-red-300 px-4 py-3 rounded mb-6 slide-up"
+      >
+        <strong class="font-bold">Error:</strong>
+        <span class="block sm:inline">{{ error }}</span>
+      </div>
+      {% endif %}
+
+      <!-- Results Display -->
+      {% if results %}
+
+      <!-- Enhanced Results Header with Threat Score -->
+      <div
+        class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6 slide-up"
+      >
+        <div
+          class="flex flex-col md:flex-row md:items-center md:justify-between gap-4"
+        >
+          <div class="flex-1">
+            <h2 class="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+              Analysis Results
+            </h2>
+            <div class="flex items-center gap-4">
+              <div class="flex items-center gap-2">
+                <span class="text-sm text-gray-600 dark:text-gray-400"
+                  >Query:</span
+                >
+                <code
+                  class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono"
+                  >{{ search_value[:50] }}{% if search_value|length > 50 %}...{%
+                  endif %}</code
+                >
+                <button
+                  onclick="copyToClipboard('{{ search_value }}')"
+                  class="copy-btn text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-4">
+            <!-- Threat Score Display -->
+            <div class="text-center">
+              <div
+                class="threat-score-circle relative w-20 h-20 mx-auto mb-2 {% if threat_score >= 80 %}threat-high{% elif threat_score >= 50 %}threat-medium{% elif threat_score >= 20 %}threat-low{% else %}threat-clean{% endif %} rounded-full flex items-center justify-center text-white font-bold text-lg shadow-lg"
+              >
+                {{ threat_score }}
+              </div>
+              <p class="text-xs text-gray-600 dark:text-gray-400">
+                Threat Score
+              </p>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="flex gap-2">
+              <button
+                onclick="bookmarkItem('{{ search_type }}', '{{ search_value }}')"
+                class="px-3 py-2 bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-200 dark:hover:bg-yellow-800 transition-colors"
+                title="Bookmark"
+              >
+                <svg
+                  class="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
+                  ></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Threat Summary -->
+        <div class="mt-4 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+          <p class="text-sm font-medium text-gray-900 dark:text-gray-100">
+            {{ threat_summary }}
+          </p>
+        </div>
+      </div>
+
+      <!-- First Row: VirusTotal, MetaDefender, OTX AlienVault -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        <!-- VirusTotal Results -->
+        {% if results.virustotal %}
+        <div
+          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
+        >
+          <div class="bg-blue-600 text-white p-4">
+            <h3 class="text-lg font-semibold flex items-center">
+              <a
+                href="https://www.virustotal.com/gui/home/search"
+                target="_blank"
+                class="flex items-center hover:underline"
+              >
+                🛡️ VirusTotal
+                <svg
+                  class="w-4 h-4 ml-2"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results.virustotal %} {% if data.error %}
+            <div class="text-red-600 dark:text-red-400">
+              <strong>Error:</strong> {{ data.error }}
+            </div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400">
+              <em>ℹ️ Not found in database</em>
+            </div>
+            {% else %}
+            <div class="space-y-2">
+              <div>
+                {% if data.malicious %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
+                >
+                  ❌ Malicious
+                </span>
+                {% else %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                >
+                  ✔️ Clean / No threat detected
+                </span>
+                {% endif %}
+              </div>
+
+              {% if data.detection_ratio %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Detections:</strong> {{ data.detection_ratio }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.detection_ratio }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.signature %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Signature:</strong> {{ data.signature }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.signature }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.report_link %}
+              <a
+                href="{{ data.report_link }}"
+                target="_blank"
+                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
+              >
+                🔗 View Full Report
+                <svg
+                  class="w-3 h-3 ml-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- MetaDefender Results -->
+        {% if results.metadefender %}
+        <div
+          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
+        >
+          <div class="bg-orange-600 text-white p-4">
+            <h3 class="text-lg font-semibold flex items-center">
+              <a
+                href="https://metadefender.com/"
+                target="_blank"
+                class="flex items-center hover:underline"
+              >
+                🛡️ MetaDefender
+                <svg
+                  class="w-4 h-4 ml-2"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results.metadefender %} {% if data.error %}
+            <div class="text-red-600 dark:text-red-400">
+              <strong>Error:</strong> {{ data.error }}
+            </div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400">
+              <em>ℹ️ Not found in database</em>
+            </div>
+            {% else %}
+            <div class="space-y-3">
+              <!-- Main Status -->
+              <div>
+                {% if data.malicious %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
+                >
+                  ❌ Malicious
+                </span>
+                {% else %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                >
+                  ✔️ Clean / No threat detected
+                </span>
+                {% endif %}
+              </div>
+
+              <!-- Traditional Scan Results -->
+              {% if data.scan_result %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Scan Result:</strong> {{ data.scan_result }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.scan_result }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.detection_ratio %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Detections:</strong> {{ data.detection_ratio }}
+              </p>
+              {% endif %}
+
+              <!-- ENHANCED: Adaptive Sandbox Results -->
+              {% if data.sandbox_result %}
+              <div class="border-t border-gray-200 dark:border-gray-600 pt-3">
+                <div class="flex items-center justify-between">
+                  <p class="text-sm dark:text-gray-300">
+                    <strong>🏥 Adaptive Sandbox:</strong>
+                    <span
+                      class="{% if 'Likely Malicious' in data.sandbox_result %}text-red-600 dark:text-red-400{% elif 'Clean' in data.sandbox_result %}text-green-600 dark:text-green-400{% else %}text-yellow-600 dark:text-yellow-400{% endif %}"
+                    >
+                      {{ data.sandbox_result }}
+                    </span>
+                  </p>
+                  <button
+                    onclick="copyToClipboard('{{ data.sandbox_result }}')"
+                    class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                  >
+                    <svg
+                      class="w-3 h-3"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                      ></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              {% endif %}
+
+              <!-- Behavioral Indicators -->
+              {% if data.sandbox_behaviors %}
+              <div class="mt-2">
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  <strong>Behaviors:</strong>
+                  {% for behavior in data.sandbox_behaviors %}
+                  <span
+                    class="inline-block bg-gray-100 dark:bg-gray-700 rounded px-2 py-1 mr-1 mb-1"
+                    >{{ behavior }}</span
+                  >
+                  {% endfor %}
+                </p>
+              </div>
+              {% endif %}
+
+              <!-- File Information -->
+              {% if data.filename %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Filename:</strong> {{ data.filename }}
+              </p>
+              {% endif %} {% if data.file_type %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>File Type:</strong> {{ data.file_type }}
+              </p>
+              {% endif %} {% if data.signature %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Signature:</strong> {{ data.signature }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.signature }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.report_link %}
+              <a
+                href="{{ data.report_link }}"
+                target="_blank"
+                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
+              >
+                🔗 View Full Report
+                <svg
+                  class="w-3 h-3 ml-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- OTX AlienVault Results -->
+        {% if results.otx %}
+        <div
+          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
+        >
+          <div class="bg-green-600 text-white p-4">
+            <h3 class="text-lg font-semibold flex items-center">
+              <a
+                href="https://otx.alienvault.com/"
+                target="_blank"
+                class="flex items-center hover:underline"
+              >
+                👁️ OTX AlienVault
+                <svg
+                  class="w-4 h-4 ml-2"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results.otx %} {% if data.error %}
+            <div class="text-red-600 dark:text-red-400">
+              <strong>Error:</strong> {{ data.error }}
+            </div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400">
+              <em>ℹ️ Not found in database</em>
+            </div>
+            {% else %}
+            <div class="space-y-2">
+              <div>
+                {% if data.malicious %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
+                >
+                  ❌ Malicious
+                </span>
+                {% else %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                >
+                  ✔️ Clean / No threat detected
+                </span>
+                {% endif %}
+              </div>
+
+              {% if data.threat_name %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Threat:</strong> {{ data.threat_name }}
+              </p>
+              {% endif %} {% if data.context %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Context:</strong> {{ data.context }}
+              </p>
+              {% endif %} {% if data.report_link %}
+              <a
+                href="{{ data.report_link }}"
+                target="_blank"
+                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
+              >
+                🔗 View Full Report
+                <svg
+                  class="w-3 h-3 ml-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Second Row: MalwareBazaar, ThreatFox, Hybrid Analysis, Triage Sandbox -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-6 mb-6">
+        <!-- MalwareBazaar Results -->
+        {% if results.malwarebazaar %}
+        <div
+          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
+        >
+          <div class="bg-red-600 text-white p-4">
+            <h3 class="text-lg font-semibold flex items-center">
+              <a
+                href="https://bazaar.abuse.ch/"
+                target="_blank"
+                class="flex items-center hover:underline"
+              >
+                🦠 MalwareBazaar
+                <svg
+                  class="w-4 h-4 ml-2"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results.malwarebazaar %} {% if data.error %}
+            <div class="text-red-600 dark:text-red-400">
+              <strong>Error:</strong> {{ data.error }}
+            </div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400">
+              <em>ℹ️ Not found in database</em>
+            </div>
+            {% else %}
+            <div class="space-y-2">
+              <div>
+                {% if data.malicious %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
+                >
+                  ❌ Malicious
+                </span>
+                {% else %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                >
+                  ✔️ Clean / No threat detected
+                </span>
+                {% endif %}
+              </div>
+
+              {% if data.signature %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Signature:</strong> {{ data.signature }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.signature }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.threat %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Threat:</strong> {{ data.threat }}
+              </p>
+              {% endif %} {% if data.first_submission_date %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>First Seen:</strong> {{ data.first_submission_date }}
+              </p>
+              {% endif %} {% if data.report_link %}
+              <a
+                href="{{ data.report_link }}"
+                target="_blank"
+                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
+              >
+                🔗 View Full Report
+                <svg
+                  class="w-3 h-3 ml-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- ThreatFox Results -->
+        {% if results.threatfox %}
+        <div
+          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
+        >
+          <div class="bg-orange-600 text-white p-4">
+            <h3 class="text-lg font-semibold flex items-center">
+              <a
+                href="https://threatfox.abuse.ch/"
+                target="_blank"
+                class="flex items-center hover:underline"
+              >
+                🦊 ThreatFox
+                <svg
+                  class="w-4 h-4 ml-2"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results.threatfox %} {% if data.error %}
+            <div class="text-red-600 dark:text-red-400">
+              <strong>Error:</strong> {{ data.error }}
+            </div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400">
+              <em>ℹ️ Not found in database</em>
+            </div>
+            {% else %}
+            <div class="space-y-2">
+              <div>
+                {% if data.malicious %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
+                >
+                  ❌ Malicious
+                </span>
+                {% else %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                >
+                  ✔️ Clean / No threat detected
+                </span>
+                {% endif %}
+              </div>
+
+              {% if data.signature %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Signature:</strong> {{ data.signature }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.signature }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.threat %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Threat:</strong> {{ data.threat }}
+              </p>
+              {% endif %} {% if data.context %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Context:</strong> {{ data.context }}
+              </p>
+              {% endif %} {% if data.report_link %}
+              <a
+                href="{{ data.report_link }}"
+                target="_blank"
+                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
+              >
+                🔗 View Full Report
+                <svg
+                  class="w-3 h-3 ml-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- Hybrid Analysis Results -->
+        {% if results.hybrid_analysis %}
+        <div
+          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
+        >
+          <div class="bg-purple-600 text-white p-4">
+            <h3 class="text-lg font-semibold flex items-center">
+              <a
+                href="https://www.hybrid-analysis.com/"
+                target="_blank"
+                class="flex items-center hover:underline"
+              >
+                🔬 Hybrid Analysis
+                <svg
+                  class="w-4 h-4 ml-2"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results.hybrid_analysis %} {% if data.error %}
+            <div class="text-red-600 dark:text-red-400">
+              <strong>Error:</strong> {{ data.error }}
+            </div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400">
+              <em>ℹ️ Not found in database</em>
+            </div>
+            {% else %}
+            <div class="space-y-2">
+              <div>
+                {% if data.malicious %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
+                >
+                  ❌ Malicious
+                </span>
+                {% else %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                >
+                  ✔️ Clean / No threat detected
+                </span>
+                {% endif %}
+              </div>
+
+              {% if data.verdict %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Verdict:</strong> {{ data.verdict }}
+              </p>
+              {% endif %} {% if data.threat_score %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Threat Score:</strong> {{ data.threat_score }}/100
+              </p>
+              {% endif %} {% if data.signature %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Signature:</strong> {{ data.signature }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.signature }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.context %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Context:</strong> {{ data.context }}
+              </p>
+              {% endif %} {% if data.report_link %}
+              <a
+                href="{{ data.report_link }}"
+                target="_blank"
+                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
+              >
+                🔗 View Full Report
+                <svg
+                  class="w-3 h-3 ml-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        <!-- Triage Sandbox Results -->
+        {% if results.triage_sandbox %}
+        <div
+          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
+        >
+          <div class="bg-red-700 text-white p-4">
+            <h3 class="text-lg font-semibold flex items-center">
+              <a
+                href="https://tria.ge/"
+                target="_blank"
+                class="flex items-center hover:underline"
+              >
+                🏥 Triage Sandbox
+                <svg
+                  class="w-4 h-4 ml-2"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results.triage_sandbox %} {% if data.error %}
+            <div class="text-red-600 dark:text-red-400">
+              <strong>Error:</strong> {{ data.error }}
+            </div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400">
+              <em>ℹ️ Not found in database</em>
+            </div>
+            {% else %}
+            <div class="space-y-2">
+              <div>
+                {% if data.malicious %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
+                >
+                  ❌ Malicious (Score: {{ data.threat_score | default(0) }}/10)
+                </span>
+                {% else %}
+                <span
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                >
+                  ✔️ Clean / No threat detected
+                </span>
+                {% endif %}
+              </div>
+
+              {% if data.signature %}
+              <div class="flex items-center justify-between">
+                <p class="text-sm dark:text-gray-300">
+                  <strong>Signature:</strong> {{ data.signature }}
+                </p>
+                <button
+                  onclick="copyToClipboard('{{ data.signature }}')"
+                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg
+                    class="w-3 h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    ></path>
+                  </svg>
+                </button>
+              </div>
+              {% endif %} {% if data.target %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Target:</strong> {{ data.target }}
+              </p>
+              {% endif %} {% if data.context %}
+              <p class="text-sm dark:text-gray-300">
+                <strong>Context:</strong> {{ data.context }}
+              </p>
+              {% endif %} {% if data.report_link %}
+              <a
+                href="{{ data.report_link }}"
+                target="_blank"
+                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
+              >
+                🔗 View Full Report
+                <svg
+                  class="w-3 h-3 ml-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
+                  ></path>
+                </svg>
+              </a>
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+
+      {% endif %}
+
+      <!-- API Health Dashboard (shows when requested) -->
+      <div
+        id="api-health-dashboard"
+        class="hidden bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6"
+      >
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
+          🏥 API Health Status
+        </h3>
+        <div
+          id="api-health-content"
+          class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+        >
+          <!-- API health cards will be populated here -->
+        </div>
+      </div>
+
+      <!-- Threat Summary Dashboard -->
+      {% if show_dashboard %}
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 slide-up">
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
+          📊 Threat Intelligence Summary
+        </h3>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+          <div class="text-center">
+            <div
+              class="w-16 h-16 mx-auto mb-2 {% if threat_score >= 80 %}bg-red-500{% elif threat_score >= 50 %}bg-orange-500{% elif threat_score >= 20 %}bg-yellow-500{% else %}bg-green-500{% endif %} rounded-full flex items-center justify-center text-white font-bold text-xl"
+            >
+              {{ threat_score }}
+            </div>
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Overall Score
+            </p>
+          </div>
+
+          <div class="text-center">
+            <div class="text-2xl font-bold text-blue-600 dark:text-blue-400">
+              {{ results|length }}
+            </div>
+            <p class="text-sm text-gray-600 dark:text-gray-400">APIs Checked</p>
+          </div>
+
+          <div class="text-center">
+            <div class="text-2xl font-bold text-red-600 dark:text-red-400">
+              {% set malicious_count = results.values() |
+              selectattr('malicious', 'equalto', true) | list | length %} {{
+              malicious_count }}
+            </div>
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Malicious Detections
+            </p>
+          </div>
+
+          <div class="text-center">
+            <div class="text-2xl font-bold text-green-600 dark:text-green-400">
+              {% set clean_count = results.values() | rejectattr('malicious',
+              'equalto', true) | rejectattr('error') | rejectattr('not_found') |
+              list | length %} {{ clean_count }}
+            </div>
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Clean Reports
+            </p>
+          </div>
+        </div>
+
+        <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
+          <h4 class="font-semibold text-gray-900 dark:text-gray-100 mb-2">
+            API Response Summary
+          </h4>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {% for api_name, result in results.items() %}
+            <div class="flex items-center gap-2 text-sm">
+              {% if result.get('error') %}
+              <span class="w-3 h-3 bg-red-500 rounded-full"></span>
+              <span class="text-gray-600 dark:text-gray-400"
+                >{{ api_name.title() }}: Error</span
+              >
+              {% elif result.get('not_found') %}
+              <span class="w-3 h-3 bg-gray-400 rounded-full"></span>
+              <span class="text-gray-600 dark:text-gray-400"
+                >{{ api_name.title() }}: Not Found</span
+              >
+              {% elif result.get('malicious') %}
+              <span class="w-3 h-3 bg-red-500 rounded-full"></span>
+              <span class="text-gray-600 dark:text-gray-400"
+                >{{ api_name.title() }}: Malicious</span
+              >
+              {% else %}
+              <span class="w-3 h-3 bg-green-500 rounded-full"></span>
+              <span class="text-gray-600 dark:text-gray-400"
+                >{{ api_name.title() }}: Clean</span
+              >
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+      {% endif %}
+    </main>
+
+    <footer class="mt-8 text-center text-gray-500 dark:text-gray-400 text-sm">
+      <p>&copy; BTGovernance</p>
+    </footer>
+
+    <!-- JavaScript for Enhanced Features -->
+    <script>
+      let currentSessionId = null;
+
+      // Only set when actually running inside the pywebview desktop shell -
+      // absent in a regular browser (dev mode via launch_app.py).
+      let pywebviewReady = false;
+      window.addEventListener("pywebviewready", () => {
+        pywebviewReady = true;
+        syncTitlebarTheme();
+      });
+
+      // Keeps the native window title bar/border colored to match the page
+      // (set via DWM attributes on the Python side - see desktop_app.py).
+      function syncTitlebarTheme() {
+        if (!pywebviewReady || !window.pywebview) return;
+        const isDark = document.documentElement.classList.contains("dark");
+        window.pywebview.api.set_theme(isDark);
+      }
+
+      // Dark mode functionality
+      function toggleDarkMode() {
+        document.documentElement.classList.toggle("dark");
+        localStorage.setItem(
+          "darkMode",
+          document.documentElement.classList.contains("dark")
+        );
+        syncTitlebarTheme();
+      }
+
+      // Initialize dark mode
+      if (localStorage.getItem("darkMode") === "true") {
+        document.documentElement.classList.add("dark");
+      }
+
+      // Start polling for terminal log output right away, regardless of
+      // which tab is active, so nothing scanned is missed.
+      startTerminalPolling();
+
+      // Tab switching
+      function switchTab(tabName) {
+        document.querySelectorAll(".tab-content").forEach((tab) => {
+          tab.classList.add("hidden");
+        });
+
+        document.querySelectorAll(".tab-btn").forEach((btn) => {
+          btn.classList.remove("border-purple-500", "text-purple-600");
+          btn.classList.add(
+            "border-transparent",
+            "text-gray-500",
+            "hover:text-gray-700",
+            "hover:border-gray-300"
+          );
+        });
+
+        document.getElementById(tabName + "-tab").classList.remove("hidden");
+
+        const activeBtn = document.querySelector(`[data-tab="${tabName}"]`);
+        activeBtn.classList.add("border-purple-500", "text-purple-600");
+        activeBtn.classList.remove(
+          "border-transparent",
+          "text-gray-500",
+          "hover:text-gray-700",
+          "hover:border-gray-300"
+        );
+
+        if (tabName === "settings") {
+          loadSettings();
+        }
+      }
+
+      // Copy to clipboard
+      async function copyToClipboard(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+          showNotification("Copied to clipboard!", "success");
+        } catch (err) {
+          console.error("Failed to copy: ", err);
+          showNotification("Failed to copy", "error");
+        }
+      }
+
+      // Show notification
+      function showNotification(message, type = "info") {
+        const notification = document.createElement("div");
+        notification.className = `fixed top-4 right-4 px-4 py-2 rounded-lg text-white text-sm z-50 ${
+          type === "success"
+            ? "bg-green-500"
+            : type === "error"
+            ? "bg-red-500"
+            : "bg-blue-500"
+        }`;
+        notification.textContent = message;
+        document.body.appendChild(notification);
+
+        setTimeout(() => {
+          notification.remove();
+        }, 3000);
+      }
+
+      // History dropdown
+      function toggleHistoryDropdown() {
+        const dropdown = document.getElementById("historyDropdown");
+        if (dropdown) {
+          dropdown.classList.toggle("hidden");
+        }
+      }
+
+      function selectFromHistory(value) {
+        document.getElementById("file_hash").value = value;
+        const dropdown = document.getElementById("historyDropdown");
+        if (dropdown) {
+          dropdown.classList.add("hidden");
+        }
+      }
+
+      // Search again function
+      function searchAgain(value) {
+        document.getElementById("file_hash").value = value;
+        switchTab("single");
+      }
+
+      // Bookmark functions
+      async function bookmarkItem(type, value, title = "") {
+        const formData = new FormData();
+        formData.append("search_type", type);
+        formData.append("search_value", value);
+        formData.append("title", title || value.substring(0, 32));
+
+        try {
+          const response = await fetch("/bookmark", {
+            method: "POST",
+            body: formData,
+          });
+          const result = await response.json();
+          showNotification(
+            result.message,
+            result.success ? "success" : "error"
+          );
+        } catch (err) {
+          showNotification("Failed to bookmark", "error");
+        }
+      }
+
+      async function removeBookmark(value) {
+        try {
+          const response = await fetch(
+            `/bookmark?search_value=${encodeURIComponent(value)}`,
+            {
+              method: "DELETE",
+            }
+          );
+          const result = await response.json();
+          showNotification(
+            result.success ? "Bookmark removed" : "Failed to remove bookmark",
+            result.success ? "success" : "error"
+          );
+          if (result.success) {
+            location.reload();
+          }
+        } catch (err) {
+          showNotification("Failed to remove bookmark", "error");
+        }
+      }
+
+      // API Health Check
+      async function checkAPIHealth() {
+        const healthBtn = document.getElementById("healthBtn");
+        const dashboard = document.getElementById("api-health-dashboard");
+        const content = document.getElementById("api-health-content");
+
+        healthBtn.innerHTML =
+          '<svg class="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>';
+
+        dashboard.classList.remove("hidden");
+        content.innerHTML =
+          '<div class="col-span-full text-center">Checking API health...</div>';
+
+        try {
+          const response = await fetch("/api/health");
+          const healthData = await response.json();
+          displayAPIHealth(healthData);
+        } catch (err) {
+          content.innerHTML =
+            '<div class="col-span-full text-center text-red-500">Failed to check API health</div>';
+        } finally {
+          healthBtn.innerHTML =
+            '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
+        }
+      }
+
+      function displayAPIHealth(healthData) {
+        const container = document.getElementById("api-health-content");
+        container.innerHTML = "";
+
+        Object.entries(healthData).forEach(([apiName, health]) => {
+          const statusColors = {
+            healthy: "green",
+            rate_limited: "yellow",
+            auth_error: "red",
+            error: "red",
+            not_configured: "gray",
+          };
+
+          const statusColor = statusColors[health.status] || "gray";
+
+          const card = document.createElement("div");
+          card.className = `p-4 border rounded-lg bg-${statusColor}-50 dark:bg-${statusColor}-900 border-${statusColor}-200 dark:border-${statusColor}-700`;
+          card.innerHTML = `
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="font-medium text-${statusColor}-800 dark:text-${statusColor}-200">${apiName
+            .replace("_", " ")
+            .toUpperCase()}</h4>
+              <span class="w-3 h-3 bg-${statusColor}-500 rounded-full"></span>
+            </div>
+            <p class="text-sm text-${statusColor}-700 dark:text-${statusColor}-300">${
+            health.message
+          }</p>
+            ${
+              health.response_time
+                ? `<p class="text-xs text-${statusColor}-600 dark:text-${statusColor}-400 mt-1">Response: ${health.response_time}ms</p>`
+                : ""
+            }
+          `;
+          container.appendChild(card);
+        });
+      }
+
+      // Bulk file upload
+      async function uploadBulkFile(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        try {
+          document.getElementById("bulk-status").classList.remove("hidden");
+
+          const response = await fetch("/bulk-upload", {
+            method: "POST",
+            body: formData,
+          });
+
+          const result = await response.json();
+
+          if (result.session_id) {
+            currentSessionId = result.session_id;
+            pollBulkProgress(result.session_id);
+            showNotification("Bulk processing started!", "success");
+          }
+        } catch (err) {
+          showNotification("Failed to upload file", "error");
+        }
+      }
+
+      // Poll bulk processing progress
+      function pollBulkProgress(sessionId) {
+        const interval = setInterval(async () => {
+          try {
+            const response = await fetch(`/bulk-status/${sessionId}`);
+            const status = await response.json();
+
+            const progressBar = document.getElementById("bulk-progress-bar");
+            const progressText = document.getElementById("bulk-progress-text");
+            const downloadBtn = document.getElementById("download-results-btn");
+
+            progressBar.style.width = status.progress_percentage + "%";
+            progressText.textContent = `${status.processed}/${status.total} (${status.progress_percentage}%)`;
+
+            if (status.completed) {
+              clearInterval(interval);
+              downloadBtn.classList.remove("hidden");
+              showNotification("Bulk analysis completed!", "success");
+            }
+          } catch (err) {
+            clearInterval(interval);
+            showNotification("Error checking progress", "error");
+          }
+        }, 2000);
+      }
+
+      // Download bulk results
+      async function downloadResults() {
+        if (!currentSessionId) return;
+
+        try {
+          const response = await fetch(`/export/csv/${currentSessionId}`);
+          const data = await response.json();
+
+          downloadCSV(data.csv_data, data.filename);
+          showNotification("Results downloaded!", "success");
+        } catch (err) {
+          showNotification("Failed to download results", "error");
+        }
+      }
+
+      // Helper function to download CSV
+      function downloadCSV(csvContent, filename) {
+        const blob = new Blob([csvContent], {
+          type: "text/csv;charset=utf-8;",
+        });
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        link.setAttribute("href", url);
+        link.setAttribute("download", filename);
+        link.style.visibility = "hidden";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+
+      // Settings tab: load current key status
+      async function loadSettings() {
+        const container = document.getElementById("settings-keys");
+        container.innerHTML =
+          '<p class="text-sm text-gray-500 dark:text-gray-400">Loading...</p>';
+
+        try {
+          const response = await fetch("/api/settings");
+          const data = await response.json();
+          renderSettings(data.keys || []);
+        } catch (err) {
+          container.innerHTML =
+            '<p class="text-sm text-red-500">Failed to load settings</p>';
+        }
+      }
+
+      function renderSettings(keys) {
+        const container = document.getElementById("settings-keys");
+        container.innerHTML = "";
+
+        keys.forEach((key) => {
+          const badgeClass = key.configured
+            ? "bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+            : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300";
+          const badgeText = key.configured ? "✔️ Configured" : "Not set";
+
+          const row = document.createElement("div");
+          row.innerHTML = `
+            <div class="flex items-center justify-between mb-1">
+              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300" for="settings-${key.env_var}">${key.label}</label>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${badgeClass}">${badgeText}</span>
+            </div>
+            <input
+              type="password"
+              id="settings-${key.env_var}"
+              data-env-var="${key.env_var}"
+              placeholder="${key.configured ? "Leave blank to keep saved key" : "Enter API key"}"
+              autocomplete="off"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
+            />
+          `;
+          container.appendChild(row);
+        });
+      }
+
+      async function saveSettings() {
+        const formData = new FormData();
+        document
+          .querySelectorAll("#settings-keys input[data-env-var]")
+          .forEach((input) => {
+            formData.append(input.dataset.envVar, input.value);
+          });
+
+        try {
+          const response = await fetch("/api/settings", {
+            method: "POST",
+            body: formData,
+          });
+          const result = await response.json();
+          showNotification(
+            result.updated && result.updated.length
+              ? "API keys saved!"
+              : "No changes to save",
+            "success"
+          );
+          loadSettings();
+        } catch (err) {
+          showNotification("Failed to save API keys", "error");
+        }
+      }
+
+      // Terminal tab: poll for new log entries
+      let terminalCursor = 0;
+
+      function startTerminalPolling() {
+        setInterval(async () => {
+          try {
+            const response = await fetch(
+              `/api/terminal-log?since=${terminalCursor}`
+            );
+            const data = await response.json();
+            appendTerminalEntries(data.entries || []);
+            terminalCursor = data.next_since || terminalCursor;
+          } catch (err) {
+            // Silently ignore - will retry on next interval
+          }
+        }, 2000);
+      }
+
+      function appendTerminalEntries(entries) {
+        if (!entries.length) return;
+
+        const output = document.getElementById("terminal-log-output");
+        if (!output) return;
+
+        if (output.textContent === "Waiting for scan output...") {
+          output.textContent = "";
+        }
+
+        entries.forEach((entry) => {
+          const time = entry.timestamp
+            ? entry.timestamp.substring(11, 19)
+            : "";
+          output.textContent += `[${time}] ${entry.text}\n\n`;
+        });
+
+        output.scrollTop = output.scrollHeight;
+      }
+
+      async function clearTerminalLog() {
+        try {
+          await fetch("/api/terminal-log/clear", { method: "POST" });
+        } catch (err) {
+          // Ignore - clear the visible log regardless
+        }
+        const output = document.getElementById("terminal-log-output");
+        if (output) {
+          output.textContent = "Waiting for scan output...";
+        }
+      }
+
+      // File upload -> local SHA-256 -> reuse the existing /lookup form
+      async function hashFileAndLookup(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const statusEl = document.getElementById("single-file-status");
+        statusEl.textContent = `Hashing ${file.name}...`;
+
+        try {
+          const buffer = await file.arrayBuffer();
+          const digest = await crypto.subtle.digest("SHA-256", buffer);
+          const hashHex = Array.from(new Uint8Array(digest))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
+
+          statusEl.textContent = `SHA-256: ${hashHex}`;
+          document.getElementById("file_hash").value = hashHex;
+          document.getElementById("single-lookup-form").submit();
+        } catch (err) {
+          statusEl.textContent = "Failed to hash file";
+          showNotification("Failed to hash file", "error");
+        }
+      }
+
+      // Sandbox Upload tab
+      let sandboxPollInterval = null;
+
+      async function startSandboxUpload() {
+        const fileInput = document.getElementById("sandbox-file-input");
+        const file = fileInput.files[0];
+        if (!file) {
+          showNotification("Choose a file first", "error");
+          return;
+        }
+
+        const services = Array.from(
+          document.querySelectorAll(".sandbox-service-checkbox:checked")
+        ).map((cb) => cb.value);
+
+        if (!services.length) {
+          showNotification("Select at least one sandbox", "error");
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("services", services.join(","));
+
+        const statusEl = document.getElementById("sandbox-upload-status");
+        statusEl.classList.remove("hidden");
+        statusEl.innerHTML =
+          '<p class="text-sm text-gray-500 dark:text-gray-400">Uploading...</p>';
+
+        try {
+          const response = await fetch("/sandbox-upload", {
+            method: "POST",
+            body: formData,
+          });
+          const result = await response.json();
+
+          if (!result.session_id) {
+            statusEl.innerHTML =
+              '<p class="text-sm text-red-500">Failed to start upload</p>';
+            return;
+          }
+
+          if (sandboxPollInterval) clearInterval(sandboxPollInterval);
+          pollSandboxStatus(result.session_id);
+          sandboxPollInterval = setInterval(
+            () => pollSandboxStatus(result.session_id),
+            5000
+          );
+        } catch (err) {
+          statusEl.innerHTML =
+            '<p class="text-sm text-red-500">Failed to upload file</p>';
+        }
+      }
+
+      async function pollSandboxStatus(sessionId) {
+        try {
+          const response = await fetch(`/sandbox-upload-status/${sessionId}`);
+          const session = await response.json();
+          renderSandboxStatus(session);
+
+          const services = Object.values(session.services || {});
+          const stillWorking = services.some(
+            (s) => s.status === "submitting" || s.status === "processing"
+          );
+          if (!stillWorking && sandboxPollInterval) {
+            clearInterval(sandboxPollInterval);
+            sandboxPollInterval = null;
+          }
+        } catch (err) {
+          // Keep polling - transient network errors shouldn't stop the loop
+        }
+      }
+
+      function renderSandboxStatus(session) {
+        const statusEl = document.getElementById("sandbox-upload-status");
+        const statusColors = {
+          submitting: "gray",
+          processing: "blue",
+          done: "green",
+          error: "red",
+          timeout: "yellow",
+        };
+        const statusLabels = {
+          submitting: "Submitting...",
+          processing: "Analyzing...",
+          done: "Done",
+          error: "Error",
+          timeout: "Timed out",
+        };
+
+        let html = `<p class="text-xs text-gray-500 dark:text-gray-400 mb-2">SHA-256: ${session.file_hash || ""}</p>`;
+
+        for (const [svc, info] of Object.entries(session.services || {})) {
+          const color = statusColors[info.status] || "gray";
+          html += `<div class="border border-gray-200 dark:border-gray-700 rounded-lg p-3">
+            <div class="flex items-center justify-between mb-1">
+              <span class="font-medium text-sm text-gray-900 dark:text-gray-100">${info.label || svc}</span>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-${color}-100 dark:bg-${color}-900 text-${color}-800 dark:text-${color}-200">${statusLabels[info.status] || info.status}</span>
+            </div>`;
+
+          if (info.status === "error" || info.status === "timeout") {
+            html += `<p class="text-xs text-red-500">${info.error || ""}</p>`;
+          } else if (info.status === "done" && info.result) {
+            html += renderInlineResult(info.result);
+          }
+
+          html += `</div>`;
+        }
+
+        statusEl.innerHTML = html;
+      }
+
+      function renderInlineResult(result) {
+        if (result.error) {
+          return `<p class="text-xs text-red-500">${result.error}</p>`;
+        }
+
+        let parts = [];
+        parts.push(
+          result.malicious
+            ? '<span class="text-red-600 dark:text-red-400">❌ Malicious</span>'
+            : '<span class="text-green-600 dark:text-green-400">✔️ Clean / No threat detected</span>'
+        );
+        if (result.detection_ratio) parts.push(`Detections: ${result.detection_ratio}`);
+        if (result.sandbox_result) parts.push(`Sandbox: ${result.sandbox_result}`);
+        if (result.signature) parts.push(`Signature: ${result.signature}`);
+        if (result.threat_name) parts.push(`Threat: ${result.threat_name}`);
+        if (result.context) parts.push(`Context: ${result.context}`);
+
+        let html = `<div class="text-xs text-gray-600 dark:text-gray-300 space-y-1 mt-1">${parts
+          .map((p) => `<p>${p}</p>`)
+          .join("")}`;
+
+        if (result.report_link) {
+          html += `<a href="${result.report_link}" target="_blank" class="inline-block text-blue-600 dark:text-blue-400 hover:underline">🔗 View Full Report</a>`;
+        }
+
+        html += `</div>`;
+        return html;
+      }
+
+      // Click outside to close dropdown
+      document.addEventListener("click", function (event) {
+        const dropdown = document.getElementById("historyDropdown");
+        const input = document.getElementById("file_hash");
+
+        if (
+          dropdown &&
+          input &&
+          !input.contains(event.target) &&
+          !dropdown.contains(event.target)
+        ) {
+          dropdown.classList.add("hidden");
+        }
+      });
+    </script>
+  </body>
+</html>
