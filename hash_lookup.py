@@ -175,16 +175,29 @@ class VirusTotalAPI(BaseAPI):
 
             return result
 
+    # The direct /files endpoint hard-caps at 32MB (HTTP 413 above that).
+    # Larger files (up to 650MB) require first requesting a dedicated
+    # upload URL and posting there instead.
+    DIRECT_UPLOAD_LIMIT_BYTES = 32 * 1024 * 1024
+
     async def submit_file(self, file_bytes: bytes, filename: str) -> str:
         """Upload a file for scanning. Returns the analysis id used to poll."""
         session = await self._get_session()
         headers = {'x-apikey': self.api_key}
+
+        if len(file_bytes) > self.DIRECT_UPLOAD_LIMIT_BYTES:
+            upload_url = await self._get_large_file_upload_url(session, headers)
+        else:
+            upload_url = f"{self.base_url}/files"
+
         form = aiohttp.FormData()
         form.add_field('file', file_bytes, filename=filename)
 
-        async with session.post(f"{self.base_url}/files", headers=headers, data=form) as response:
+        async with session.post(upload_url, headers=headers, data=form) as response:
             if response.status == 401:
                 raise Exception("Invalid VT_API_KEY in config.env")
+            elif response.status == 413:
+                raise Exception("File too large for VirusTotal (650MB max)")
             elif response.status == 429:
                 raise Exception("VirusTotal rate limit exceeded")
             elif response.status not in (200, 201):
@@ -193,6 +206,16 @@ class VirusTotalAPI(BaseAPI):
 
             data = await response.json()
             return data['data']['id']
+
+    async def _get_large_file_upload_url(self, session: aiohttp.ClientSession, headers: Dict[str, str]) -> str:
+        """Files over 32MB must be posted to a dedicated, short-lived upload URL."""
+        async with session.get(f"{self.base_url}/files/upload_url", headers=headers) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise Exception(f"Failed to get large-file upload URL: HTTP {response.status}: {error_text}")
+
+            data = await response.json()
+            return data['data']
 
     async def poll_submission(self, token: str, file_hash: str) -> Dict[str, Any]:
         """Check analysis progress; once complete, return the standard query_hash result."""

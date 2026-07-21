@@ -1791,22 +1791,6 @@
     <script>
       let currentSessionId = null;
 
-      // Only set when actually running inside the pywebview desktop shell -
-      // absent in a regular browser (dev mode via launch_app.py).
-      let pywebviewReady = false;
-      window.addEventListener("pywebviewready", () => {
-        pywebviewReady = true;
-        syncTitlebarTheme();
-      });
-
-      // Keeps the native window title bar/border colored to match the page
-      // (set via DWM attributes on the Python side - see desktop_app.py).
-      function syncTitlebarTheme() {
-        if (!pywebviewReady || !window.pywebview) return;
-        const isDark = document.documentElement.classList.contains("dark");
-        window.pywebview.api.set_theme(isDark);
-      }
-
       // Dark mode functionality
       function toggleDarkMode() {
         document.documentElement.classList.toggle("dark");
@@ -1814,7 +1798,6 @@
           "darkMode",
           document.documentElement.classList.contains("dark")
         );
-        syncTitlebarTheme();
       }
 
       // Initialize dark mode
