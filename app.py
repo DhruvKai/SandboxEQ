@@ -19,7 +19,7 @@ import time
 
 
 # Import your existing hash lookup tool
-from hash_lookup import HashLookupTool, _is_valid_hash
+from hash_lookup import HashLookupTool, _is_valid_hash, build_log_text, hash_algo_label
 import config_store
 from dotenv import load_dotenv
 
@@ -356,6 +356,7 @@ class SandboxUploader:
 
     async def process_upload(self, file_bytes: bytes, filename: str, services: List[str], session_id: str) -> None:
         file_hash = hashlib.sha256(file_bytes).hexdigest()
+        self.storage.add_terminal_entry('_scan_start', 'Scan', f"📄 {filename}\nSHA-256: {file_hash}")
 
         session = {
             'filename': filename,
@@ -392,6 +393,8 @@ class SandboxUploader:
                         'status': 'error',
                         'error': str(e)
                     }
+                    label = session['services'][svc]['label']
+                    self.storage.add_terminal_entry(svc, label, f"{label.upper()}\n{'-' * 40}\nError: {e}")
 
             elapsed = 0
             while elapsed < self.MAX_WAIT_SECONDS:
@@ -404,6 +407,7 @@ class SandboxUploader:
 
                 for svc in pending:
                     api_instance = lookup_tool.apis[svc]
+                    label = session['services'][svc]['label']
                     try:
                         outcome = await api_instance.poll_submission(tokens[svc], file_hash)
                         if outcome['status'] == 'done':
@@ -412,12 +416,15 @@ class SandboxUploader:
                                 'status': 'done',
                                 'result': outcome['result']
                             }
+                            self.storage.add_terminal_entry(svc, label, build_log_text(label, svc, outcome['result']))
                         elif outcome['status'] == 'error':
+                            error_text = outcome.get('error', 'Unknown error')
                             session['services'][svc] = {
                                 **session['services'][svc],
                                 'status': 'error',
-                                'error': outcome.get('error', 'Unknown error')
+                                'error': error_text
                             }
+                            self.storage.add_terminal_entry(svc, label, f"{label.upper()}\n{'-' * 40}\nError: {error_text}")
                         # 'pending' -> leave as 'processing', check again next cycle
                     except Exception as e:
                         session['services'][svc] = {
@@ -425,11 +432,14 @@ class SandboxUploader:
                             'status': 'error',
                             'error': str(e)
                         }
+                        self.storage.add_terminal_entry(svc, label, f"{label.upper()}\n{'-' * 40}\nError: {e}")
 
             for svc in tokens:
                 if session['services'][svc]['status'] == 'processing':
                     session['services'][svc]['status'] = 'timeout'
                     session['services'][svc]['error'] = 'Analysis did not complete in time - check the vendor site directly'
+                    label = session['services'][svc]['label']
+                    self.storage.add_terminal_entry(svc, label, f"{label.upper()}\n{'-' * 40}\nTimed out waiting for analysis to complete.")
 
         finally:
             for api in lookup_tool.apis.values():
@@ -551,23 +561,29 @@ async def get_form(request: Request):
     })
 
 @app.post("/lookup", response_class=HTMLResponse)
-async def lookup_hash(request: Request, file_hash: str = Form(...)):
+async def lookup_hash(request: Request, file_hash: str = Form(...), source_filename: str = Form("")):
     """Single hash/URL lookup with enhanced features."""
     search_value = file_hash.strip().lower()
     search_type = 'url' if search_value.startswith('http') else 'hash'
-    
+
     # Validate input
     if search_type == 'hash' and not _is_valid_hash(search_value):
         return templates.TemplateResponse("index.html", {
-            "request": request, 
-            "results": None, 
+            "request": request,
+            "results": None,
             "error": "Invalid hash format!",
             "history": storage.get_search_history(limit=10),
             "bookmarks": storage.get_bookmarks(),
             "show_dashboard": False
         })
-    
+
     lookup_tool = HashLookupTool(log_sink=storage.add_terminal_entry)
+
+    if search_type == 'hash':
+        header = f"📄 {source_filename}\nSHA-256: {search_value}" if source_filename.strip() else f"{hash_algo_label(search_value)}: {search_value}"
+    else:
+        header = search_value
+    storage.add_terminal_entry('_scan_start', 'Scan', header)
 
     try:
         # Perform lookup

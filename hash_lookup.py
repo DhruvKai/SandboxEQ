@@ -1075,51 +1075,55 @@ class HashLookupTool:
         # "Unknown"/not-found results are omitted entirely (not just softened),
         # and certificate details are never included - both by design.
         if self.log_sink is not None and not result.get('not_found'):
-            self.log_sink(api_name, service_name, self._build_log_text(service_name, api_name, result))
+            self.log_sink(api_name, service_name, build_log_text(service_name, api_name, result))
 
-    def _build_log_text(self, service_name: str, api_name: str, result: Dict[str, Any]) -> str:
-        """Plain-text (no ANSI, no certificate info) mirror of display_result."""
-        lines = [service_name.upper(), '-' * 40]
 
-        if result.get('error'):
-            lines.append(f"Error: {result['error']}")
-            return "\n".join(lines)
+def build_log_text(service_name: str, api_name: str, result: Dict[str, Any]) -> str:
+    """Plain-text (no ANSI, no certificate info) mirror of display_result's
+    output for one API's result. Shared by the single-lookup path
+    (HashLookupTool.display_result) and the sandbox-upload path (app.py's
+    SandboxUploader), so both log in the same format."""
+    lines = [service_name.upper(), '-' * 40]
 
-        lines.append("MALICIOUS" if result.get('malicious') else "Clean/No threat detected")
-
-        if result.get('detection_ratio'):
-            lines.append(f"Detections: {result['detection_ratio']}")
-        if result.get('scan_result'):
-            lines.append(f"Scan Result: {result['scan_result']}")
-        if api_name == 'metadefender' and result.get('sandbox_result'):
-            lines.append(f"Adaptive Sandbox: {result['sandbox_result']}")
-        if result.get('sandbox_behaviors'):
-            lines.append(f"Behaviors: {', '.join(result['sandbox_behaviors'])}")
-        if result.get('threat_score'):
-            lines.append(f"Threat Score: {result['threat_score']}")
-        if result.get('target'):
-            lines.append(f"Target: {result['target']}")
-        if result.get('first_submission_date'):
-            lines.append(f"First Submission Date: {result['first_submission_date']}")
-        if result.get('last_analysis_date'):
-            lines.append(f"Last Analysis Date: {result['last_analysis_date']}")
-        if result.get('rescan_notice'):
-            lines.append(f"Notice: {result['rescan_notice']}")
-        if result.get('signature'):
-            lines.append(f"Signature: {result['signature']}")
-        if result.get('filename'):
-            lines.append(f"Filename: {result['filename']}")
-        if result.get('file_type'):
-            lines.append(f"File Type: {result['file_type']}")
-        # code_signing_cert_info / timestamp_signing_cert_info deliberately omitted.
-        if result.get('threat_name'):
-            lines.append(f"Threat: {result['threat_name']}")
-        if result.get('context'):
-            lines.append(f"Context: {result['context']}")
-        if result.get('report_link'):
-            lines.append(f"Report: {result['report_link']}")
-
+    if result.get('error'):
+        lines.append(f"Error: {result['error']}")
         return "\n".join(lines)
+
+    lines.append("MALICIOUS" if result.get('malicious') else "Clean/No threat detected")
+
+    if result.get('detection_ratio'):
+        lines.append(f"Detections: {result['detection_ratio']}")
+    if result.get('scan_result'):
+        lines.append(f"Scan Result: {result['scan_result']}")
+    if api_name == 'metadefender' and result.get('sandbox_result'):
+        lines.append(f"Adaptive Sandbox: {result['sandbox_result']}")
+    if result.get('sandbox_behaviors'):
+        lines.append(f"Behaviors: {', '.join(result['sandbox_behaviors'])}")
+    if result.get('threat_score'):
+        lines.append(f"Threat Score: {result['threat_score']}")
+    if result.get('target'):
+        lines.append(f"Target: {result['target']}")
+    if result.get('first_submission_date'):
+        lines.append(f"First Submission Date: {result['first_submission_date']}")
+    if result.get('last_analysis_date'):
+        lines.append(f"Last Analysis Date: {result['last_analysis_date']}")
+    if result.get('rescan_notice'):
+        lines.append(f"Notice: {result['rescan_notice']}")
+    if result.get('signature'):
+        lines.append(f"Signature: {result['signature']}")
+    if result.get('filename'):
+        lines.append(f"Filename: {result['filename']}")
+    if result.get('file_type'):
+        lines.append(f"File Type: {result['file_type']}")
+    # code_signing_cert_info / timestamp_signing_cert_info deliberately omitted.
+    if result.get('threat_name'):
+        lines.append(f"Threat: {result['threat_name']}")
+    if result.get('context'):
+        lines.append(f"Context: {result['context']}")
+    if result.get('report_link'):
+        lines.append(f"Report: {result['report_link']}")
+
+    return "\n".join(lines)
 
 
 def _is_valid_hash(hash_string: str) -> bool:
@@ -1131,6 +1135,11 @@ def _is_valid_hash(hash_string: str) -> bool:
     except ValueError:
         return False
     return len(hash_string) in [32, 40, 64]
+
+
+def hash_algo_label(hash_string: str) -> str:
+    """Best-guess algorithm name from hash length, for display purposes only."""
+    return {32: 'MD5', 40: 'SHA1', 64: 'SHA256'}.get(len(hash_string or ''), 'Hash')
 
 
 async def main():

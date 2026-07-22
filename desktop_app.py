@@ -135,6 +135,7 @@ def main():
         height=860,
         min_size=(900, 600),
         background_color=LIGHT_BG,
+        text_select=True,  # pywebview disables text selection/copy by default
     )
 
     window.events.closed += server_thread.stop
