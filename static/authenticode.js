@@ -859,6 +859,52 @@
       </button>`;
   }
 
+  // Mirrors the "Embedded Signatures" list in Windows' own Digital
+  // Signature Details dialog (Name of signer / Digest algorithm /
+  // Timestamp, one row per signature) - a single at-a-glance table for
+  // dual SHA-1/SHA-256 signed files, so you don't have to scroll through
+  // two separate "Signature N of 2" sections just to compare them. Each
+  // row links down to its full section below via an anchor.
+  function embeddedSignaturesTable(report) {
+    if (!report.signatures || report.signatures.length < 2) return '';
+
+    const rows = report.signatures.map((sig, i) => {
+      if (sig.error) {
+        return `
+          <tr class="border-t border-gray-200 dark:border-gray-700">
+            <td colspan="3" class="px-3 py-2 text-sm text-red-600 dark:text-red-400">Signature ${i + 1}: ${escapeHtml(sig.error)}</td>
+          </tr>`;
+      }
+      const name = sig.leaf ? sig.leaf.subject.cn : 'Unknown';
+      const ts = sig.timestamp && sig.timestamp.time ? fmtDateShort(sig.timestamp.time) : 'None';
+      return `
+        <tr class="border-t border-gray-200 dark:border-gray-700">
+          <td class="px-3 py-2 text-sm text-gray-900 dark:text-gray-100">
+            <a href="#digicert-sig-${i}" class="hover:underline hover:text-indigo-600 dark:hover:text-indigo-400">${escapeHtml(name)}</a>
+          </td>
+          <td class="px-3 py-2 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(sig.digestAlgorithm || 'unknown')}</td>
+          <td class="px-3 py-2 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(ts)}</td>
+        </tr>`;
+    }).join('');
+
+    return `
+      <div class="mb-4 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+        <p class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 px-3 pt-2">Embedded Signatures</p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left">
+            <thead>
+              <tr class="text-xs text-gray-500 dark:text-gray-400">
+                <th class="px-3 py-1.5 font-medium">Name of signer</th>
+                <th class="px-3 py-1.5 font-medium">Digest algorithm</th>
+                <th class="px-3 py-1.5 font-medium">Timestamp</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
   // Short, scannable "Cert Information" block: who signed it, how long it's
   // valid, which CA issued it, and whether/when it was countersigned -
   // everything else lives in the collapsible "Full details" below.
@@ -912,7 +958,7 @@
   function renderSignature(sig, index, total) {
     if (sig.error) {
       return `
-        <div class="border border-red-200 dark:border-red-800 rounded-lg p-4 bg-red-50 dark:bg-red-900/30">
+        <div id="digicert-sig-${index}" class="border border-red-200 dark:border-red-800 rounded-lg p-4 bg-red-50 dark:bg-red-900/30">
           <p class="text-sm text-red-700 dark:text-red-300"><strong>Signature ${index + 1}:</strong> ${escapeHtml(sig.error)}</p>
         </div>`;
     }
@@ -954,7 +1000,7 @@
     const chainCerts = (sig.chain || []).filter((c) => c !== sig.leaf);
 
     return `
-      <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+      <div id="digicert-sig-${index}" class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden scroll-mt-4">
         <div class="bg-indigo-600 text-white px-4 py-2.5">
           <span class="font-semibold text-sm">✍️ Signature ${index + 1}${total > 1 ? ` of ${total}` : ''} — ${escapeHtml(sig.digestAlgorithm || 'unknown')} digest</span>
         </div>
@@ -1017,6 +1063,8 @@
       parts.push(`<div class="text-sm text-gray-600 dark:text-gray-400">This file has no embedded Authenticode signature. (Some Windows system files are "catalog-signed" instead — signed via a separate .cat file rather than embedded in the binary — and will also show as unsigned here.)</div>`);
       return parts.join('');
     }
+
+    parts.push(embeddedSignaturesTable(report));
 
     parts.push('<div class="space-y-4">');
     report.signatures.forEach((sig, i) => parts.push(renderSignature(sig, i, report.signatures.length)));
