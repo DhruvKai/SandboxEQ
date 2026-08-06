@@ -6,6 +6,7 @@ in a native window via pywebview - no browser tab is ever opened.
 
 import ctypes
 import os
+import re
 import socket
 import sys
 import threading
@@ -40,6 +41,15 @@ import webview
 
 import app as app_module
 import config_store
+
+if getattr(sys, 'frozen', False):
+    # Packaged .exe: assets bundled alongside templates/static (see
+    # build_exe.py) get extracted into this PyInstaller onefile temp dir.
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.ico")
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_BORDER_COLOR = 34
@@ -82,6 +92,25 @@ def _set_titlebar_theme(hwnd: int) -> None:
         pass
 
 
+def _reassert_window_icon(window: "webview.Window") -> None:
+    """WebView2 applies the page's own favicon to the host window's
+    title-bar/taskbar icon shortly after each navigation - which would
+    silently replace the custom icon set at window-creation time. index.html
+    now points its favicon at this same icon.ico so that race is harmless
+    either way, but this re-applies it explicitly too as a defense-in-depth
+    (e.g. covers pywebview versions/backends that read _state['icon'] only
+    once). Safe to call repeatedly; wired to window.events.loaded, which
+    fires on the initial load AND the Single Lookup file-upload's reload.
+    """
+    if not os.path.isfile(ICON_PATH) or window.native is None:
+        return
+    try:
+        from System.Drawing import Icon as NetIcon  # pythonnet - only usable once webview's CLR bridge is live
+        window.native.Icon = NetIcon(ICON_PATH)
+    except Exception:
+        pass
+
+
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -97,6 +126,52 @@ def _wait_for_server(host: str, port: int, timeout: float = 45.0) -> bool:
         except OSError:
             time.sleep(0.1)
     return False
+
+
+def _unique_path(path: str) -> str:
+    """Return `path` unchanged if free, otherwise `name (1).ext`, `name (2).ext`,
+    ... - mirrors how a browser avoids clobbering a repeat download."""
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    n = 1
+    while True:
+        candidate = f"{root} ({n}){ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
+class Api:
+    """Exposed to the page as `window.pywebview.api`. WebView2's built-in
+    download handling is inconsistent about where a download lands, so the
+    Digital Certificate tab's "Export CSV" button calls this directly
+    instead - saving straight to the user's Downloads folder and opening it,
+    same as a real Explorer double-click would."""
+
+    def export_csv(self, filename: str, content: str) -> dict:
+        try:
+            downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+            os.makedirs(downloads_dir, exist_ok=True)
+
+            safe_name = re.sub(r'[\\/:*?"<>|]', "_", filename or "export.csv").strip() or "export.csv"
+            if not safe_name.lower().endswith(".csv"):
+                safe_name += ".csv"
+
+            path = _unique_path(os.path.join(downloads_dir, safe_name))
+            # utf-8-sig (BOM) so Excel renders non-ASCII cert fields (e.g.
+            # accented issuer names) correctly instead of as mojibake.
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(content)
+
+            try:
+                os.startfile(path)  # opens with whatever's associated with .csv
+            except Exception:
+                pass  # saved either way - opening it is a nicety, not required
+
+            return {"success": True, "path": path}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 class ServerThread(threading.Thread):
@@ -131,6 +206,7 @@ def main():
     window = webview.create_window(
         "SandBoxEQ",
         f"http://{host}:{port}/",
+        js_api=Api(),
         width=1280,
         height=860,
         min_size=(900, 600),
@@ -140,8 +216,15 @@ def main():
 
     window.events.closed += server_thread.stop
     window.events.shown += lambda: _set_titlebar_theme(window.native.Handle.ToInt32())
+    window.events.loaded += lambda: _reassert_window_icon(window)
 
-    webview.start()
+    # Without an explicit icon, the winforms backend falls back to
+    # extracting one from sys.executable - which is python.exe (generic
+    # icon) when run via `python desktop_app.py`, and only correct in the
+    # packaged .exe. Passing it explicitly fixes the taskbar AND the
+    # window's own title-bar icon (top-left corner) in both cases.
+    icon_kwargs = {"icon": ICON_PATH} if os.path.isfile(ICON_PATH) else {}
+    webview.start(**icon_kwargs)
 
     server_thread.stop()
     server_thread.join(timeout=5)

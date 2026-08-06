@@ -249,13 +249,7 @@ class MetaDefenderAPI(BaseAPI):
         
         async with session.get(url, headers=headers) as response:
             if response.status == 404:
-                return {
-                    'malicious': False,
-                    'scan_result': 'Not found in API - check web interface',
-                    'detection_ratio': 'Unknown',
-                    'sandbox_result': 'Not analyzed',
-                    'report_link': f'https://metadefender.com/results/hash/{file_hash.upper()}'
-                }
+                return {'not_found': True}
             elif response.status == 401:
                 raise Exception("Invalid METADEFENDER_API_KEY in config.env")
             elif response.status == 429:
@@ -425,18 +419,25 @@ class OTXAlienVaultAPI(BaseAPI):
             data = await response.json()
             pulse_info = data.get('pulse_info', {})
             pulse_count = pulse_info.get('count', 0)
-            
+
+            # OTX doesn't scan files itself - it only reports whether other
+            # analysts have linked this hash to a threat pulse. A count of 0
+            # means OTX has no data on this hash at all, not that it actively
+            # scanned the file and found it clean, so treat it the same way
+            # the other not-found responses are treated.
+            if pulse_count == 0:
+                return {'not_found': True}
+
             result = {
-                'malicious': pulse_count > 0,
-                'context': f"Associated with {pulse_count} threat reports" if pulse_count > 0 else "No threat reports",
+                'malicious': True,
+                'context': f"Associated with {pulse_count} threat reports",
                 'report_link': f"https://otx.alienvault.com/indicator/file/{file_hash}"
             }
-            
-            if pulse_count > 0:
-                pulses = pulse_info.get('pulses', [])
-                if pulses:
-                    result['threat_name'] = pulses[0].get('name', 'Unknown')
-            
+
+            pulses = pulse_info.get('pulses', [])
+            if pulses:
+                result['threat_name'] = pulses[0].get('name', 'Unknown')
+
             return result
 
 

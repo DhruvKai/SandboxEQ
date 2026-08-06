@@ -4,6 +4,10 @@ import os
 data_files = [
     '--add-data=templates;templates',
     '--add-data=static;static',
+    # Bundled so desktop_app.py can resolve ICON_PATH at runtime (for the
+    # window's own title-bar/taskbar icon) even though PyInstaller's
+    # --icon flag below already embeds it as the .exe's own resource icon.
+    '--add-data=assets;assets',
     # NOTE: config.env is deliberately NOT bundled - the packaged app
     # creates a blank one next to itself on first run (config_store.py),
     # so real API keys never get embedded inside the .exe.

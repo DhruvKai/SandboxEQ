@@ -4,7 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SandBoxEQ</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext x='8' y='13' font-size='14' text-anchor='middle'%3E%F0%9F%AA%B2%3C/text%3E%3C/svg%3E" />
+    <!-- Also doubles as the desktop app's title-bar/taskbar icon: WebView2
+         applies the page favicon to the host window shortly after each
+         navigation (see desktop_app.py's _reassert_window_icon), so this
+         has to be the real app icon rather than a placeholder. -->
+    <link rel="icon" type="image/x-icon" href="/static/icon.ico" />
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       // Dark mode configuration
@@ -94,6 +98,7 @@
         background-color: rgba(150, 150, 150, 0.7);
       }
     </style>
+    <script src="/static/authenticode.js"></script>
   </head>
   <body
     class="bg-gray-100 dark:bg-gray-900 min-h-screen flex flex-col items-center p-6 transition-colors duration-300"
@@ -185,6 +190,13 @@
               data-tab="single"
             >
               Single Lookup
+            </button>
+            <button
+              onclick="switchTab('digicert')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              data-tab="digicert"
+            >
+              Digital Certificate
             </button>
             <button
               onclick="switchTab('bulk')"
@@ -331,6 +343,31 @@
             />
             <p id="single-file-status" class="text-xs text-gray-500 dark:text-gray-400 mt-2"></p>
           </div>
+        </div>
+
+        <!-- Digital Certificate Tab -->
+        <div id="digicert-tab" class="tab-content p-6 hidden">
+          <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            Inspect the Authenticode digital signature embedded in a Windows executable (.exe, .dll, .sys, .msi, ...).
+            The file is parsed entirely in your browser and is <strong>never uploaded</strong> — only the signature
+            metadata shown below ever leaves the file. Use this to see who signed a binary, which CA issued the
+            certificate, whether it's still valid, and whether the file has been tampered with since it was signed.
+          </p>
+
+          <div class="flex items-center justify-center w-full mb-4">
+            <label
+              for="digicert-file-input"
+              class="flex flex-col items-center justify-center w-full h-24 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 dark:border-gray-600"
+            >
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                <span class="font-semibold">Click to choose a file</span> to inspect its digital signature
+              </p>
+              <input id="digicert-file-input" type="file" class="hidden" onchange="analyzeCertificateFile(event)" />
+            </label>
+          </div>
+          <p id="digicert-status" class="text-xs text-gray-500 dark:text-gray-400 mb-4"></p>
+
+          <div id="digicert-results"></div>
         </div>
 
         <!-- Bulk Analysis Tab -->
@@ -1808,6 +1845,68 @@
       // which tab is active, so nothing scanned is missed.
       startTerminalPolling();
 
+      // Delegated handlers for the Digital Certificate tab's dynamically
+      // rendered buttons - copy-field (data-copy) and CSV export
+      // (data-csv-b64), which use data attributes instead of an inline
+      // onclick like the server-rendered copy-btn's elsewhere.
+      document.addEventListener("click", (event) => {
+        const copyBtn = event.target.closest("[data-copy]");
+        if (copyBtn) {
+          copyToClipboard(copyBtn.dataset.copy);
+          return;
+        }
+        const csvBtn = event.target.closest("[data-csv-b64]");
+        if (csvBtn) {
+          const csv = decodeURIComponent(escape(atob(csvBtn.dataset.csvB64)));
+          const filename = csvBtn.dataset.csvFilename || "certificate-report.csv";
+          exportCsv(csv, filename);
+        }
+      });
+
+      // Saves + opens the CSV natively when running inside the desktop app
+      // (window.pywebview.api, see desktop_app.py's Api.export_csv - it
+      // writes straight to the Downloads folder and opens the file, since
+      // WebView2's built-in download handling is inconsistent about where
+      // a download actually lands). Falls back to a normal browser
+      // download (still lands in Downloads, just can't auto-open - browsers
+      // don't allow a page to open a file it just saved) when running as a
+      // plain web page.
+      function exportCsv(csv, filename) {
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.export_csv) {
+          window.pywebview.api
+            .export_csv(filename, csv)
+            .then((result) => {
+              if (result && result.success) {
+                showNotification(`Saved to Downloads and opened: ${filename}`, "success");
+              } else {
+                showNotification("Failed to save CSV" + (result && result.error ? `: ${result.error}` : ""), "error");
+                downloadCSV(csv, filename);
+              }
+            })
+            .catch(() => downloadCSV(csv, filename));
+        } else {
+          downloadCSV(csv, filename);
+        }
+      }
+
+      // If a Single Lookup file upload stashed a Digital Certificate report
+      // before submitting (see hashFileAndLookup below), restore it here so
+      // the tab is already populated once this fresh page has loaded.
+      (function restorePendingCertReport() {
+        const pending = sessionStorage.getItem("pendingCertReport");
+        if (!pending) return;
+        sessionStorage.removeItem("pendingCertReport");
+        try {
+          const { status, html } = JSON.parse(pending);
+          const statusEl = document.getElementById("digicert-status");
+          const resultsEl = document.getElementById("digicert-results");
+          if (statusEl) statusEl.textContent = status;
+          if (resultsEl) resultsEl.innerHTML = html;
+        } catch (err) {
+          console.error("Failed to restore certificate report", err);
+        }
+      })();
+
       // Tab switching
       function switchTab(tabName) {
         document.querySelectorAll(".tab-content").forEach((tab) => {
@@ -2220,10 +2319,50 @@
           statusEl.textContent = `SHA-256: ${hashHex}`;
           document.getElementById("file_hash").value = hashHex;
           document.getElementById("source_filename").value = file.name;
+
+          // Also run the client-side certificate analysis (see
+          // /static/authenticode.js) and stash the rendered result so the
+          // Digital Certificate tab is already populated once the lookup
+          // page below reloads - sessionStorage is what survives that
+          // full-page POST navigation (see restorePendingCertReport above).
+          try {
+            const report = await window.AuthenticodeParser.analyzeFile(file);
+            sessionStorage.setItem("pendingCertReport", JSON.stringify({
+              status: `Analyzed ${file.name} (${(file.size / 1024).toFixed(1)} KB) — parsed locally, nothing uploaded.`,
+              html: window.AuthenticodeParser.renderReport(report),
+            }));
+          } catch (certErr) {
+            console.error("Certificate analysis failed", certErr);
+            // Non-fatal - the hash lookup below still proceeds either way.
+          }
+
           document.getElementById("single-lookup-form").submit();
         } catch (err) {
           statusEl.textContent = "Failed to hash file";
           showNotification("Failed to hash file", "error");
+        }
+      }
+
+      // Digital Certificate tab -> parse the Authenticode signature fully
+      // client-side (see /static/authenticode.js). The file is never sent
+      // to the server; only the resulting text is rendered here.
+      async function analyzeCertificateFile(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const statusEl = document.getElementById("digicert-status");
+        const resultsEl = document.getElementById("digicert-results");
+        statusEl.textContent = `Analyzing ${file.name}...`;
+        resultsEl.innerHTML = "";
+
+        try {
+          const report = await window.AuthenticodeParser.analyzeFile(file);
+          statusEl.textContent = `Analyzed ${file.name} (${(file.size / 1024).toFixed(1)} KB) — parsed locally, nothing uploaded.`;
+          resultsEl.innerHTML = window.AuthenticodeParser.renderReport(report);
+        } catch (err) {
+          console.error(err);
+          statusEl.textContent = "Failed to analyze file";
+          resultsEl.innerHTML = `<div class="text-sm text-red-600 dark:text-red-400">Error: ${err.message}</div>`;
         }
       }
 
