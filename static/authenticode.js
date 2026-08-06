@@ -661,6 +661,38 @@
     };
   }
 
+  // Windows' own dual-signing convention (`signtool sign` then `signtool
+  // sign /as` to append a second, e.g. SHA-256, signature to an already
+  // SHA-1-signed PE) does NOT add a second WIN_CERTIFICATE blob or a
+  // second SignerInfo alongside the first - it embeds the entire second
+  // Authenticode signature (its own ContentInfo/SignedData, certs,
+  // SignerInfo, even its own timestamp) as an unauthenticated attribute
+  // (szOID_NESTED_SIGNATURE) ON the first SignerInfo. Recurse into it so
+  // that's rendered as its own full signature too, not silently dropped.
+  const NESTED_SIGNATURE_OID = '1.3.6.1.4.1.311.2.4.1';
+
+  async function collectSignatures(pkcs7, bytes, peMeta, results) {
+    // Normally exactly one SignerInfo per blob - but handle the rare
+    // multi-SignerInfo-in-one-blob encoding too, so a dual SHA-1/SHA-256
+    // signature is never silently dropped no matter how it's encoded.
+    const signerInfos = pkcs7.signerInfos.length ? pkcs7.signerInfos : [null];
+    for (const signerInfo of signerInfos) {
+      results.push(await buildSignatureEntry(signerInfo, pkcs7, bytes, peMeta));
+
+      const nested = signerInfo && signerInfo.unauthAttrs && signerInfo.unauthAttrs[NESTED_SIGNATURE_OID];
+      if (nested) {
+        for (const nestedAttrValue of nested) {
+          try {
+            const nestedPkcs7 = await parsePkcs7(nestedAttrValue.raw);
+            await collectSignatures(nestedPkcs7, bytes, peMeta, results);
+          } catch (e) {
+            results.push({ error: 'Failed to parse nested signature: ' + e.message });
+          }
+        }
+      }
+    }
+  }
+
   async function analyzeFile(file) {
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -692,13 +724,7 @@
         }
 
         const pkcs7 = await parsePkcs7(blob.der);
-        // Normally exactly one SignerInfo per blob - but handle the rare
-        // multi-SignerInfo-in-one-blob encoding too, so a dual SHA-1/
-        // SHA-256 signature is never silently dropped either way.
-        const signerInfos = pkcs7.signerInfos.length ? pkcs7.signerInfos : [null];
-        for (const signerInfo of signerInfos) {
-          report.signatures.push(await buildSignatureEntry(signerInfo, pkcs7, bytes, peMeta));
-        }
+        await collectSignatures(pkcs7, bytes, peMeta, report.signatures);
       } catch (e) {
         report.signatures.push({ error: 'Failed to parse this signature: ' + e.message });
       }
