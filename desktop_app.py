@@ -92,25 +92,6 @@ def _set_titlebar_theme(hwnd: int) -> None:
         pass
 
 
-def _reassert_window_icon(window: "webview.Window") -> None:
-    """WebView2 applies the page's own favicon to the host window's
-    title-bar/taskbar icon shortly after each navigation - which would
-    silently replace the custom icon set at window-creation time. index.html
-    now points its favicon at this same icon.ico so that race is harmless
-    either way, but this re-applies it explicitly too as a defense-in-depth
-    (e.g. covers pywebview versions/backends that read _state['icon'] only
-    once). Safe to call repeatedly; wired to window.events.loaded, which
-    fires on the initial load AND the Single Lookup file-upload's reload.
-    """
-    if not os.path.isfile(ICON_PATH) or window.native is None:
-        return
-    try:
-        from System.Drawing import Icon as NetIcon  # pythonnet - only usable once webview's CLR bridge is live
-        window.native.Icon = NetIcon(ICON_PATH)
-    except Exception:
-        pass
-
-
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -216,7 +197,6 @@ def main():
 
     window.events.closed += server_thread.stop
     window.events.shown += lambda: _set_titlebar_theme(window.native.Handle.ToInt32())
-    window.events.loaded += lambda: _reassert_window_icon(window)
 
     # Without an explicit icon, the winforms backend falls back to
     # extracting one from sys.executable - which is python.exe (generic
