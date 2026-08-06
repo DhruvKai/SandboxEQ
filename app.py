@@ -533,17 +533,24 @@ api_health_checker = APIHealthChecker(storage)
 # FastAPI app
 app = FastAPI()
 
-try:
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-except:
-    pass
-
 if getattr(sys, 'frozen', False):
     # If running as a PyInstaller EXE
     base_dir = sys._MEIPASS
 else:
     # Normal Python interpreter
     base_dir = os.path.dirname(os.path.abspath(__file__))
+
+try:
+    # Must be resolved against base_dir, not a bare relative path: a plain
+    # "static" is looked up relative to the process's current working
+    # directory, which for the packaged .exe is wherever the user launched
+    # it from (e.g. their Desktop) - not the PyInstaller extraction dir the
+    # bundled static/ folder actually lives in. That mismatch used to fail
+    # silently here (bare except) and take /static/authenticode.js down
+    # with it, breaking the Digital Certificate tab outside of a dev checkout.
+    app.mount("/static", StaticFiles(directory=os.path.join(base_dir, "static")), name="static")
+except Exception:
+    pass
 
 templates = Jinja2Templates(directory=os.path.join(base_dir, "templates"))
 
