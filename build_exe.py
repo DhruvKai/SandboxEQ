@@ -30,6 +30,8 @@ PyInstaller.__main__.run([
     '--hidden-import=jinja2',
     '--hidden-import=multipart',
     '--hidden-import=config_store',
+    '--hidden-import=url_lookup',
+    '--hidden-import=truststore',
     '--hidden-import=webview',
     '--collect-all=webview',
     '--collect-all=clr_loader',

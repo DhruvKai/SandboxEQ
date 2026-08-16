@@ -19,7 +19,11 @@ import time
 
 
 # Import your existing hash lookup tool
-from hash_lookup import HashLookupTool, _is_valid_hash, build_log_text, hash_algo_label
+from hash_lookup import HashLookupTool, _is_valid_hash, build_log_text, hash_algo_label, strip_hash_label
+from url_lookup import (
+    URLLookupTool, SSLLabsAPI, _is_valid_url,
+    cross_check_url_and_hash, close_all as close_url_apis,
+)
 import config_store
 from dotenv import load_dotenv
 
@@ -115,55 +119,75 @@ class InMemoryStorage:
 
 class ThreatAnalyzer:
     """Enhanced threat analysis and scoring."""
-    
+
+    # Weight scores based on API reliability. Shared by both hash results
+    # (virustotal/metadefender/otx/etc. keys) and URL results (same keys,
+    # since it's the same underlying provider, plus the URL-only providers
+    # below) - a results dict only ever contains one kind, so there's no
+    # collision in practice.
+    API_WEIGHTS = {
+        'virustotal': 30,
+        'crowdstrike': 25,
+        'triage_sandbox': 20,
+        'hybrid_analysis': 15,
+        'openphish': 15,
+        'urlscan': 15,
+        'malwarebazaar': 10,
+        'threatfox': 10,
+        'checkphish': 12,
+        'urlhaus': 12,
+        'ipqualityscore': 10,
+        'metadefender': 8,
+        'otx': 5,
+    }
+
+    # Informational panels, not detection engines - they never carry a
+    # 'malicious' verdict and shouldn't dilute the confidence/consensus math.
+    NON_SCORING_KEYS = {
+        'certificate', 'cert_transparency', 'cross_check', 'domain_age', 'redirect_chain', 'typosquat',
+        'idn_check', 'url_heuristics', 'favicon', 'download_content', 'hosting_reputation',
+    }
+
     @staticmethod
     def calculate_threat_score(results: Dict[str, Any]) -> int:
         """Calculate overall threat score (0-100)."""
         scores = []
         total_apis = 0
         malicious_count = 0
-        
+
         for api_name, result in results.items():
+            if api_name in ThreatAnalyzer.NON_SCORING_KEYS:
+                continue
             if isinstance(result, dict) and not result.get('error') and not result.get('not_found'):
                 total_apis += 1
                 if result.get('malicious', False):
                     malicious_count += 1
-                    
-                    # Weight scores based on API reliability
-                    api_weights = {
-                        'virustotal': 30,
-                        'crowdstrike': 25,
-                        'triage_sandbox': 20,
-                        'hybrid_analysis': 15,
-                        'malwarebazaar': 10,
-                        'threatfox': 10,
-                        'metadefender': 8,
-                        'otx': 5
-                    }
-                    scores.append(api_weights.get(api_name, 10))
-        
+                    scores.append(ThreatAnalyzer.API_WEIGHTS.get(api_name, 10))
+
         if total_apis == 0:
             return 0
-        
+
         # Calculate confidence based on consensus
         confidence = malicious_count / total_apis
         base_score = sum(scores)
-        
+
         # Apply confidence multiplier
         final_score = min(100, int(base_score * confidence * 1.2))
-        
+
         return final_score
-    
+
     @staticmethod
     def generate_summary(results: Dict[str, Any]) -> str:
         """Generate human-readable threat summary."""
         threat_score = ThreatAnalyzer.calculate_threat_score(results)
-        
+
         malicious_apis = []
         clean_apis = []
         error_apis = []
-        
+
         for api_name, result in results.items():
+            if api_name in ThreatAnalyzer.NON_SCORING_KEYS:
+                continue
             if isinstance(result, dict):
                 if result.get('error'):
                     error_apis.append(api_name)
@@ -173,7 +197,7 @@ class ThreatAnalyzer:
                     malicious_apis.append(api_name)
                 else:
                     clean_apis.append(api_name)
-        
+
         total_checked = len(malicious_apis) + len(clean_apis)
         
         if threat_score >= 80:
@@ -186,8 +210,110 @@ class ThreatAnalyzer:
             level = "✅ CLEAN"
         
         summary = f"{level} (Score: {threat_score}/100) - {len(malicious_apis)}/{total_checked} APIs detected threats"
-        
+
         return summary
+
+
+class CompositeVerdict:
+    """URL-only: merges category signals (from whichever providers reported
+    one), the risk/threat score, certificate legitimacy, domain age,
+    redirect-chain behavior, and a typosquat/brand-lookalike check into a
+    single Whitelist / Caution / Block recommendation. The category part is
+    the practical substitute for an authoritative Palo Alto/Symantec
+    category verdict - see the URL-scanning plan for why those aren't
+    queryable via a public API and are deliberately not integrated here."""
+
+    CATEGORY_SOURCES = ('virustotal', 'metadefender', 'ipqualityscore')
+
+    @staticmethod
+    def build(results: Dict[str, Any], threat_score: int) -> Dict[str, Any]:
+        category_votes: Dict[str, int] = {}
+        for api_name in CompositeVerdict.CATEGORY_SOURCES:
+            category = (results.get(api_name) or {}).get('category')
+            if category:
+                category_votes[category] = category_votes.get(category, 0) + 1
+
+        if category_votes:
+            category = max(category_votes, key=category_votes.get)
+            agreeing_sources = category_votes[category]
+            category_confidence = 'high' if agreeing_sources > 1 or len(category_votes) == 1 else 'low'
+        else:
+            category = 'Uncategorized - manual review'
+            category_confidence = 'none'
+
+        cert = results.get('certificate') or {}
+        if cert.get('error'):
+            cert_status = 'unknown'
+        elif not cert.get('trusted', True) or cert.get('expired'):
+            cert_status = 'fail'
+        elif cert.get('warning'):
+            cert_status = 'warn'
+        else:
+            cert_status = 'pass'
+
+        # A close-but-not-exact match to a known brand domain is one of the
+        # strongest phishing signals available before any reputation engine
+        # has had a chance to see and report the domain - weighted like a
+        # failed certificate check, not a soft warning.
+        typosquat = results.get('typosquat') or {}
+        is_typosquat = bool(typosquat.get('warning')) and not typosquat.get('is_known_brand')
+
+        # An identical favicon on a domain that ISN'T the real brand is
+        # harder evidence than the name similarity alone - a cloned
+        # phishing kit, not just a coincidentally similar registration.
+        favicon = results.get('favicon') or {}
+        favicon_confirms_clone = bool(favicon.get('matches_brand'))
+
+        # Same weight class as typosquat - a homoglyph/IDN domain is the
+        # same attack, just executed with lookalike characters instead of
+        # a near-miss spelling.
+        idn_check = results.get('idn_check') or {}
+        is_homoglyph = bool(idn_check.get('warning'))
+
+        # Hosting on infrastructure with a substantial abuse history is
+        # independent of anything about the domain name itself.
+        hosting_reputation = results.get('hosting_reputation') or {}
+        is_abusive_hosting = bool(hosting_reputation.get('warning'))
+
+        # Softer signals - each nudges toward Caution on its own, but don't
+        # individually justify a Block the way the harder signals above do.
+        domain_age = results.get('domain_age') or {}
+        is_very_new_domain = bool(domain_age.get('warning'))
+
+        redirect_chain = results.get('redirect_chain') or {}
+        redirects_off_domain = bool(redirect_chain.get('warning'))
+
+        url_heuristics = results.get('url_heuristics') or {}
+        has_url_heuristic_flags = bool(url_heuristics.get('flags'))
+
+        download_content = results.get('download_content') or {}
+        download_content_mismatch = bool(download_content.get('warning'))
+
+        hard_block_signal = is_typosquat or favicon_confirms_clone or is_homoglyph or is_abusive_hosting
+
+        if threat_score >= 50 or cert_status == 'fail' or hard_block_signal:
+            verdict = 'Block'
+        elif (threat_score >= 20 or cert_status == 'warn' or category_confidence == 'none'
+              or is_very_new_domain or redirects_off_domain or has_url_heuristic_flags or download_content_mismatch):
+            verdict = 'Caution - Manual Review'
+        else:
+            verdict = 'Whitelist'
+
+        return {
+            'category': category,
+            'category_confidence': category_confidence,
+            'cert_status': cert_status,
+            'is_typosquat': is_typosquat,
+            'favicon_confirms_clone': favicon_confirms_clone,
+            'is_homoglyph': is_homoglyph,
+            'is_abusive_hosting': is_abusive_hosting,
+            'is_very_new_domain': is_very_new_domain,
+            'redirects_off_domain': redirects_off_domain,
+            'has_url_heuristic_flags': has_url_heuristic_flags,
+            'download_content_mismatch': download_content_mismatch,
+            'verdict': verdict,
+        }
+
 
 class BulkProcessor:
     """Handle bulk hash/URL processing."""
@@ -222,19 +348,20 @@ class BulkProcessor:
         }
         
         lookup_tool = HashLookupTool()
-        
+        url_lookup_tool = URLLookupTool()
+
         try:
             # Process in batches to avoid overwhelming APIs
             batch_size = 5
             for i in range(0, len(items), batch_size):
                 batch = items[i:i + batch_size]
                 batch_results = []
-                
+
                 # Process batch concurrently
                 tasks = []
                 for item in batch:
                     if self._is_url(item):
-                        tasks.append(self._lookup_url(lookup_tool, item))
+                        tasks.append(self._lookup_url(url_lookup_tool, item))
                     elif _is_valid_hash(item):
                         tasks.append(lookup_tool.lookup_hash(item))
                     else:
@@ -276,7 +403,8 @@ class BulkProcessor:
             # Close API sessions
             for api in lookup_tool.apis.values():
                 await api.close_session()
-        
+            await close_url_apis(url_lookup_tool)
+
         # Mark session as completed
         self.storage.bulk_sessions[session_id]['status'] = 'completed'
         self.storage.bulk_sessions[session_id]['completed_at'] = datetime.now().isoformat()
@@ -296,14 +424,9 @@ class BulkProcessor:
         except:
             return False
     
-    async def _lookup_url(self, lookup_tool: HashLookupTool, url: str) -> Dict[str, Any]:
-        """Lookup URL using available APIs."""
-        # For now, return a placeholder since URL lookup is complex
-        # You can implement this later with the URL extension
-        return {
-            'not_found': True,
-            'message': 'URL lookup not yet implemented'
-        }
+    async def _lookup_url(self, url_lookup_tool: URLLookupTool, url: str) -> Dict[str, Any]:
+        """Lookup URL using available URL-scanning APIs."""
+        return await url_lookup_tool.lookup_url(url)
     
     def _generate_bulk_summary(self, results: List[Dict]) -> Dict[str, Any]:
         """Generate summary statistics for bulk analysis."""
@@ -452,49 +575,79 @@ class SandboxUploader:
 
 class APIHealthChecker:
     """Monitor API health and quotas."""
-    
+
+    # Providers whose key is shared with a hash-side provider that's
+    # already health-checked (same account, same auth) - re-testing them
+    # here would be redundant. Only the genuinely URL-only providers get
+    # their own probe.
+    URL_ONLY_PROVIDERS = ('urlhaus', 'openphish', 'ipqualityscore', 'urlscan', 'checkphish')
+    PROBE_TIMEOUT_SECONDS = 15  # a couple of these (urlscan, checkphish) run a real scan+poll loop -
+    # bounded short here so "Check API Health" stays fast; a timeout just means "didn't finish
+    # that quickly", not necessarily broken (a real lookup can still confirm either way).
+    PROBE_URL = "https://www.google.com"
+
     def __init__(self, storage: InMemoryStorage):
         self.storage = storage
         self.cache_timeout = 300  # 5 minutes
-    
+
     async def check_all_apis_health(self) -> Dict[str, Any]:
-        """Check health of all configured APIs."""
+        """Check health of all configured hash- and URL-scanning APIs, concurrently."""
         lookup_tool = HashLookupTool()
+        url_lookup_tool = URLLookupTool()
         health_results = {}
-        
+
         try:
+            names, tasks = [], []
             for api_name, api_instance in lookup_tool.apis.items():
                 if api_instance.is_configured():
-                    health_results[api_name] = await self._check_api_health(api_name, api_instance)
+                    names.append(api_name)
+                    tasks.append(self._check_api_health(api_instance.query_hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
                 else:
                     health_results[api_name] = {
-                        'status': 'not_configured',
-                        'message': 'API key not configured',
-                        'quota': None,
-                        'response_time': None
+                        'status': 'not_configured', 'message': 'API key not configured',
+                        'quota': None, 'response_time': None,
+                    }
+
+            for api_name in self.URL_ONLY_PROVIDERS:
+                api_instance = url_lookup_tool.apis[api_name]
+                if api_instance.is_configured():
+                    names.append(api_name)
+                    tasks.append(self._check_api_health(api_instance.query_url, self.PROBE_URL))
+                else:
+                    health_results[api_name] = {
+                        'status': 'not_configured', 'message': 'API key not configured',
+                        'quota': None, 'response_time': None,
+                    }
+
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for api_name, result in zip(names, results):
+                    health_results[api_name] = result if not isinstance(result, Exception) else {
+                        'status': 'error', 'message': str(result) or type(result).__name__,
+                        'response_time': None, 'quota': None,
                     }
         finally:
             for api in lookup_tool.apis.values():
                 await api.close_session()
-        
+            await close_url_apis(url_lookup_tool)
+
         # Cache results
         self.storage.api_health_cache = {
             'results': health_results,
             'timestamp': time.time()
         }
-        
+
         return health_results
-    
-    async def _check_api_health(self, api_name: str, api_instance) -> Dict[str, Any]:
-        """Check health of individual API."""
+
+    async def _check_api_health(self, query_fn, probe_value: str) -> Dict[str, Any]:
+        """Health-check one provider by calling its query_hash/query_url
+        with a bounded timeout, whichever `query_fn` is passed."""
         start_time = time.time()
-        
+
         try:
-            # Try a simple test query with a known hash
-            test_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # SHA256 of empty string
-            result = await api_instance.query_hash(test_hash)
+            result = await asyncio.wait_for(query_fn(probe_value), timeout=self.PROBE_TIMEOUT_SECONDS)
             response_time = round((time.time() - start_time) * 1000, 2)  # ms
-            
+
             # Determine status based on result
             if isinstance(result, dict) and result.get('error'):
                 if 'rate limit' in result['error'].lower():
@@ -515,11 +668,20 @@ class APIHealthChecker:
                 'quota': {'remaining': 'Unknown', 'total': 'Unknown'}
             }
             
+        except asyncio.TimeoutError:
+            response_time = round((time.time() - start_time) * 1000, 2)
+            return {
+                'status': 'unknown',
+                'message': f"No response within {self.PROBE_TIMEOUT_SECONDS}s - this provider can be slow "
+                           "(e.g. a real scan+poll cycle); try a real lookup to confirm it's actually down.",
+                'response_time': response_time,
+                'quota': None
+            }
         except Exception as e:
             response_time = round((time.time() - start_time) * 1000, 2)
             return {
                 'status': 'error',
-                'message': str(e),
+                'message': str(e) or type(e).__name__,
                 'response_time': response_time,
                 'quota': None
             }
@@ -568,10 +730,20 @@ async def get_form(request: Request):
     })
 
 @app.post("/lookup", response_class=HTMLResponse)
-async def lookup_hash(request: Request, file_hash: str = Form(...), source_filename: str = Form("")):
+async def lookup_hash(
+    request: Request,
+    file_hash: str = Form(...),
+    source_filename: str = Form(""),
+    cross_check_hash: str = Form(""),
+    cross_check_url: str = Form(""),
+):
     """Single hash/URL lookup with enhanced features."""
-    search_value = file_hash.strip().lower()
-    search_type = 'url' if search_value.startswith('http') else 'hash'
+    raw_value = file_hash.strip()
+    search_type = 'url' if raw_value.lower().startswith('http') else 'hash'
+    # URLs are case-sensitive (paths, query params) - only hashes get
+    # lowercased, and only hashes get a 'sha256:'-style label stripped
+    # (some tools/UIs prepend one when you copy a hash).
+    search_value = strip_hash_label(raw_value).lower() if search_type == 'hash' else raw_value
 
     # Validate input
     if search_type == 'hash' and not _is_valid_hash(search_value):
@@ -583,8 +755,15 @@ async def lookup_hash(request: Request, file_hash: str = Form(...), source_filen
             "bookmarks": storage.get_bookmarks(),
             "show_dashboard": False
         })
-
-    lookup_tool = HashLookupTool(log_sink=storage.add_terminal_entry)
+    if search_type == 'url' and not _is_valid_url(search_value):
+        return templates.TemplateResponse("index.html", {
+            "request": request,
+            "results": None,
+            "error": "Invalid URL format!",
+            "history": storage.get_search_history(limit=10),
+            "bookmarks": storage.get_bookmarks(),
+            "show_dashboard": False
+        })
 
     if search_type == 'hash':
         header = f"📄 {source_filename}\nSHA-256: {search_value}" if source_filename.strip() else f"{hash_algo_label(search_value)}: {search_value}"
@@ -592,21 +771,49 @@ async def lookup_hash(request: Request, file_hash: str = Form(...), source_filen
         header = search_value
     storage.add_terminal_entry('_scan_start', 'Scan', header)
 
+    lookup_tool = HashLookupTool(log_sink=storage.add_terminal_entry) if search_type == 'hash' else None
+    url_lookup_tool = URLLookupTool(log_sink=storage.add_terminal_entry) if search_type == 'url' else None
+
     try:
         # Perform lookup
-        results = await lookup_tool.lookup_hash(search_value)
-        
+        if search_type == 'hash':
+            results = await lookup_tool.lookup_hash(search_value)
+            # Advanced Options' "Download URL to cross-check" - the reverse
+            # direction of the URL-side cross-check: same VT relationship,
+            # just entered from the hash side. Failure here must not
+            # discard an already-successful hash lookup - it only ever
+            # sets results['cross_check'], never raises past this point.
+            if cross_check_url.strip() and _is_valid_url(cross_check_url.strip()):
+                try:
+                    results['cross_check'] = await asyncio.wait_for(
+                        cross_check_url_and_hash(cross_check_url.strip(), search_value), timeout=30,
+                    )
+                except Exception as e:
+                    results['cross_check'] = {'hash': search_value, 'match': None, 'note': f'Cross-check failed: {e or type(e).__name__}'}
+        else:
+            # Belt-and-suspenders on top of URLLookupTool's own internal
+            # per-provider/overall timeouts: this route must never hang the
+            # HTTP connection open indefinitely, no matter what.
+            results = await asyncio.wait_for(
+                url_lookup_tool.lookup_url(search_value, cross_check_hash=cross_check_hash),
+                timeout=150,
+            )
+
         # Calculate threat score and summary
         threat_score = ThreatAnalyzer.calculate_threat_score(results)
         summary = ThreatAnalyzer.generate_summary(results)
-        
+        composite_verdict = CompositeVerdict.build(results, threat_score) if search_type == 'url' else None
+
         # Add to search history
         storage.add_search_history(search_type, search_value, summary, threat_score)
-        
+
         # Close API sessions
-        for api in lookup_tool.apis.values():
-            await api.close_session()
-        
+        if lookup_tool is not None:
+            for api in lookup_tool.apis.values():
+                await api.close_session()
+        if url_lookup_tool is not None:
+            await close_url_apis(url_lookup_tool)
+
         return templates.TemplateResponse("index.html", {
             "request": request,
             "results": results,
@@ -615,20 +822,27 @@ async def lookup_hash(request: Request, file_hash: str = Form(...), source_filen
             "search_type": search_type,
             "threat_score": threat_score,
             "threat_summary": summary,
+            "composite_verdict": composite_verdict,
             "history": storage.get_search_history(limit=10),
             "bookmarks": storage.get_bookmarks(),
             "show_dashboard": True
         })
-    
+
     except Exception as e:
         # Close sessions on error
-        for api in lookup_tool.apis.values():
-            await api.close_session()
-        
+        if lookup_tool is not None:
+            for api in lookup_tool.apis.values():
+                await api.close_session()
+        if url_lookup_tool is not None:
+            await close_url_apis(url_lookup_tool)
+
+        error_message = "Lookup timed out - one or more providers took too long to respond. Try again." \
+            if isinstance(e, asyncio.TimeoutError) else str(e)
+
         return templates.TemplateResponse("index.html", {
             "request": request,
             "results": None,
-            "error": str(e),
+            "error": error_message,
             "history": storage.get_search_history(limit=10),
             "bookmarks": storage.get_bookmarks(),
             "show_dashboard": False
@@ -752,6 +966,10 @@ async def save_settings(
     THREATFOX_API_KEY: str = Form(""),
     HYBRID_API_KEY: str = Form(""),
     TRIAGE_API_KEY: str = Form(""),
+    IPQS_API_KEY: str = Form(""),
+    URLSCAN_API_KEY: str = Form(""),
+    CHECKPHISH_API_KEY: str = Form(""),
+    ABUSEIPDB_API_KEY: str = Form(""),
 ):
     """Save API keys to config.env. Blank fields leave the existing key untouched."""
     updates = {
@@ -762,13 +980,30 @@ async def save_settings(
         "THREATFOX_API_KEY": THREATFOX_API_KEY,
         "HYBRID_API_KEY": HYBRID_API_KEY,
         "TRIAGE_API_KEY": TRIAGE_API_KEY,
+        "IPQS_API_KEY": IPQS_API_KEY,
+        "URLSCAN_API_KEY": URLSCAN_API_KEY,
+        "CHECKPHISH_API_KEY": CHECKPHISH_API_KEY,
+        "ABUSEIPDB_API_KEY": ABUSEIPDB_API_KEY,
     }
     updated_keys = config_store.write_keys(updates)
 
-    # Reload immediately so the next HashLookupTool() picks up new keys without a restart.
+    # Reload immediately so the next HashLookupTool()/URLLookupTool() picks up new keys without a restart.
     load_dotenv(config_store.get_config_path(), override=True)
 
     return {"success": True, "updated": updated_keys}
+
+@app.get("/api/ssl-labs-scan")
+async def ssl_labs_scan(hostname: str):
+    """On-demand SSL Labs deep-dive grade for a single hostname. Not called
+    automatically by /lookup - triggered explicitly from the URL results
+    panel since a fresh assessment can take 1-2 minutes."""
+    ssl_labs = SSLLabsAPI()
+    try:
+        return await ssl_labs.deep_scan(hostname)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    finally:
+        await ssl_labs.close_session()
 
 @app.get("/api/terminal-log")
 async def get_terminal_log(since: int = 0):

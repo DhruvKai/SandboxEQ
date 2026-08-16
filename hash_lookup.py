@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import aiohttp
 import json
+import ssl
 import time
 from typing import Dict, Any
 import os
@@ -18,6 +19,32 @@ from colorama import Fore, Style, init
 from datetime import datetime, timezone
 
 import config_store
+
+# Verify outbound HTTPS against the OS's own certificate store (same trust
+# path a browser uses) instead of the bundled `certifi` CA list. In
+# practice several providers (urlscan.io, abuse.ch's APIs) send a chain
+# that Windows' store completes fine but a several-months-old certifi
+# snapshot can't - which otherwise surfaces as a false "certificate has
+# expired" / "unable to get local issuer certificate" error even though
+# the site's cert is perfectly valid. Falls back to aiohttp's normal
+# certifi-based default if `truststore` isn't installed for some reason.
+try:
+    import truststore
+
+    def _new_ssl_context() -> ssl.SSLContext:
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+except ImportError:
+    def _new_ssl_context():
+        return None  # aiohttp/ssl module's own default verification
+
+
+def _exc_text(e: Exception) -> str:
+    """str(e) is empty for some stdlib exceptions (notably asyncio.TimeoutError
+    raised by a client-side timeout, and ssl errors on some platforms) -
+    without this, an error card can render as just 'Error: ' with nothing
+    after it. Falls back to the exception's class name so there's always
+    something to show."""
+    return str(e) or type(e).__name__
 
 # In a --windowed PyInstaller build (used for the desktop app), there is no
 # console at all and sys.stdout/sys.stderr are None - printing anything
@@ -56,7 +83,7 @@ class BaseAPI:
         if not self.session:
             self.session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
-                connector=aiohttp.TCPConnector(limit=10)
+                connector=aiohttp.TCPConnector(limit=10, ssl=_new_ssl_context())
             )
         return self.session
     
@@ -963,11 +990,12 @@ class HashLookupTool:
         try:
             result = await api_instance.query_hash(file_hash)
         except Exception as e:
-            print(f"{Fore.RED}{api_name.upper()} Error: {str(e)}")
+            error_text = _exc_text(e)
+            print(f"{Fore.RED}{api_name.upper()} Error: {error_text}")
             if self.log_sink is not None:
                 service_name = api_name.replace('_', ' ').title()
-                self.log_sink(api_name, service_name, f"{service_name.upper()}\n{'-' * 40}\nError: {str(e)}")
-            return {'error': str(e)}
+                self.log_sink(api_name, service_name, f"{service_name.upper()}\n{'-' * 40}\nError: {error_text}")
+            return {'error': error_text}
 
         # A failure while merely printing/logging must never discard a
         # successful result - display_result is best-effort only.
@@ -1125,6 +1153,23 @@ def build_log_text(service_name: str, api_name: str, result: Dict[str, Any]) -> 
         lines.append(f"Report: {result['report_link']}")
 
     return "\n".join(lines)
+
+
+_HASH_LABEL_PREFIXES = ('sha256:', 'sha1:', 'md5:', 'sha256=', 'sha1=', 'md5=')
+
+
+def strip_hash_label(hash_string: str) -> str:
+    """Strips a leading 'sha256:'/'md5:'/... label some tools prepend
+    (Linux `sha256sum` piped through certain formatters, some hash-checker
+    UIs' copy buttons, ...) - without this a pasted value like
+    'sha256:abc123...' fails hash validation and never matches anything,
+    even though the actual hash after the label is perfectly valid."""
+    stripped = hash_string.strip()
+    lowered = stripped.lower()
+    for prefix in _HASH_LABEL_PREFIXES:
+        if lowered.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return stripped
 
 
 def _is_valid_hash(hash_string: str) -> bool:

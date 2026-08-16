@@ -12,19 +12,36 @@ import tempfile
 
 from dotenv import dotenv_values
 
-# (env_var, service_key, display_label) - service_key matches HashLookupTool.apis
-# dict keys / the results card keys used throughout templates/index.html.
+# (env_var, service_key, display_label, groups) - service_key matches
+# HashLookupTool.apis / URLLookupTool.apis dict keys / the results card keys
+# used throughout templates/index.html. `groups` is a tuple of ("hash",
+# "url") saying which Settings sub-tab(s) the key should show up under -
+# several providers (VirusTotal, MetaDefender, OTX, MalwareBazaar/URLhaus,
+# Hybrid Analysis, Triage) use the same key to unlock both a hash-scanning
+# and a URL-scanning provider class, so they appear in both groups.
 KNOWN_KEYS = [
-    ("VT_API_KEY", "virustotal", "VirusTotal"),
-    ("METADEFENDER_API_KEY", "metadefender", "MetaDefender"),
-    ("OTX_API_KEY", "otx", "OTX AlienVault"),
-    ("MB_API_KEY", "malwarebazaar", "MalwareBazaar"),
-    ("THREATFOX_API_KEY", "threatfox", "ThreatFox"),
-    ("HYBRID_API_KEY", "hybrid_analysis", "Hybrid Analysis"),
-    ("TRIAGE_API_KEY", "triage_sandbox", "Triage Sandbox"),
+    ("VT_API_KEY", "virustotal", "VirusTotal", ("hash", "url")),
+    ("METADEFENDER_API_KEY", "metadefender", "MetaDefender", ("hash", "url")),
+    ("OTX_API_KEY", "otx", "OTX AlienVault", ("hash", "url")),
+    ("MB_API_KEY", "malwarebazaar", "MalwareBazaar / URLhaus", ("hash", "url")),
+    ("THREATFOX_API_KEY", "threatfox", "ThreatFox", ("hash",)),
+    ("HYBRID_API_KEY", "hybrid_analysis", "Hybrid Analysis", ("hash", "url")),
+    # "url" deliberately not in groups here - Triage's free/community tier
+    # rejects URL submissions (confirmed: 401 on a key that submits files
+    # fine), so it's hash/file-scanning only. See url_lookup.py's note where
+    # TriageURLAPI used to be.
+    ("TRIAGE_API_KEY", "triage_sandbox", "Triage Sandbox", ("hash",)),
+    # No Google Safe Browsing entry - its free tier is licensed for
+    # non-commercial use only, not appropriate for a corporate BU tool.
+    # See url_lookup.py's note where SafeBrowsingAPI used to be.
+    # No OpenPhish entry here - its community feed needs no key (see url_lookup.py's OpenPhishAPI).
+    ("IPQS_API_KEY", "ipqualityscore", "IPQualityScore", ("url",)),
+    ("URLSCAN_API_KEY", "urlscan", "urlscan.io", ("url",)),
+    ("CHECKPHISH_API_KEY", "checkphish", "CheckPhish", ("url",)),
+    ("ABUSEIPDB_API_KEY", "hosting_reputation", "AbuseIPDB (hosting reputation)", ("url",)),
 ]
 
-_KEY_NAMES = [env_var for env_var, _, _ in KNOWN_KEYS]
+_KEY_NAMES = [env_var for env_var, _, _, _ in KNOWN_KEYS]
 
 _TEMPLATE = """# SandBoxEQ - API Configuration
 # Fill these in from the Settings tab, or edit this file directly.
@@ -49,6 +66,24 @@ HYBRID_API_KEY=
 
 # Triage Sandbox API Key - https://tria.ge/
 TRIAGE_API_KEY=
+
+# --- URL scanning ---
+
+# (No key for Google Safe Browsing - deliberately not integrated, see config_store.py's KNOWN_KEYS comment.)
+
+# (No key for OpenPhish - its community feed at openphish.com/feed.txt is open, no signup needed.)
+
+# IPQualityScore API Key - https://www.ipqualityscore.com/
+IPQS_API_KEY=
+
+# urlscan.io API Key - https://urlscan.io/
+URLSCAN_API_KEY=
+
+# CheckPhish (Bolster) API Key - https://checkphish.ai/
+CHECKPHISH_API_KEY=
+
+# AbuseIPDB API Key (hosting IP reputation) - https://www.abuseipdb.com/register
+ABUSEIPDB_API_KEY=
 """
 
 _KEY_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -77,12 +112,13 @@ def read_masked_keys() -> list:
     values = dotenv_values(path)
 
     result = []
-    for env_var, service_key, label in KNOWN_KEYS:
+    for env_var, service_key, label, groups in KNOWN_KEYS:
         value = values.get(env_var)
         result.append({
             "env_var": env_var,
             "service": service_key,
             "label": label,
+            "groups": list(groups),
             "configured": bool(value and value.strip()),
         })
     return result

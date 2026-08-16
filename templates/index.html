@@ -240,9 +240,9 @@
 
         <!-- Single Lookup Tab -->
         <div id="single-tab" class="tab-content p-6">
-          <form id="single-lookup-form" action="/lookup" method="POST" class="space-y-4">
+          <form id="single-lookup-form" action="/lookup" method="POST" class="space-y-4" onsubmit="return handleSingleLookupSubmit()">
             <input type="hidden" id="source_filename" name="source_filename" value="" />
-            <div>
+            <div id="main-input-block" class="transition-opacity">
               <label
                 for="file_hash"
                 class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
@@ -254,8 +254,7 @@
                   type="text"
                   id="file_hash"
                   name="file_hash"
-                  required
-                  oninput="document.getElementById('source_filename').value = ''"
+                  oninput="document.getElementById('source_filename').value = ''; updateMainInputState()"
                   class="w-full px-3 py-2 pr-10 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
                   placeholder="e.g., d41d8cd98f00b204e9800998ecf8427e or https://example.com"
                 />
@@ -310,14 +309,70 @@
                 </div>
                 {% endif %}
               </div>
+              <p id="main-input-note" class="hidden text-xs text-gray-400 dark:text-gray-500 mt-1">
+                Using the Advanced Options input below instead.
+              </p>
             </div>
 
+            <!-- Download-source-validation use case: give either (or both)
+                 of the pair below and we cross-check them against each
+                 other via VirusTotal's "files downloaded from this URL"
+                 relationship - works regardless of which one (hash or URL)
+                 you put in the main box above. Entirely optional; a plain
+                 lookup above still runs its full analysis on its own. -->
+            <details id="advanced-options" class="group border border-gray-200 dark:border-gray-700 rounded-md">
+              <summary
+                class="cursor-pointer select-none px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-md flex items-center justify-between"
+              >
+                <span>⚙️ Advanced Options</span>
+                <span class="text-xs text-gray-400 group-open:hidden">Download-source validation</span>
+              </summary>
+              <div class="px-3 pb-3 pt-1 space-y-3 border-t border-gray-200 dark:border-gray-700">
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  Verifying where a downloaded application came from? Fill in whichever of these you have - if the
+                  main box above has the URL, give the file's hash; if it has the hash, give the download URL.
+                  We'll cross-check the pair against VirusTotal's record of files served from that URL.
+                </p>
+                <div>
+                  <label for="cross_check_hash" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                    Hash of the downloaded file (used when the box above is a URL)
+                  </label>
+                  <input
+                    type="text"
+                    id="cross_check_hash"
+                    name="cross_check_hash"
+                    oninput="updateMainInputState()"
+                    class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
+                    placeholder="MD5 / SHA1 / SHA256 of the file you downloaded"
+                  />
+                </div>
+                <div>
+                  <label for="cross_check_url" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                    Download URL the file came from (used when the box above is a hash)
+                  </label>
+                  <input
+                    type="text"
+                    id="cross_check_url"
+                    name="cross_check_url"
+                    oninput="updateMainInputState()"
+                    class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
+                    placeholder="https://vendor.example.com/download/setup.exe"
+                  />
+                </div>
+              </div>
+            </details>
+
             <button
+              id="single-lookup-submit"
               type="submit"
-              class="w-full bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-150 ease-in-out transform hover:scale-105"
+              class="w-full bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-150 ease-in-out transform hover:scale-105 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
             >
               🔍 Lookup Hash/URL
             </button>
+            <p id="single-lookup-wait-notice" class="hidden text-xs text-center text-gray-500 dark:text-gray-400">
+              Scanning... URL lookups can take up to ~2 minutes (some sandboxes actually detonate the page). Please
+              don't click Lookup again - this page will refresh automatically when it's done.
+            </p>
           </form>
 
           <!-- File upload -> local SHA-256 hash -> lookup. The file itself is
@@ -515,7 +570,34 @@
           <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
             API keys are stored locally in <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">config.env</code> next to the app. Leave a field blank to keep the currently saved key.
           </p>
-          <div id="settings-keys" class="space-y-4"></div>
+
+          <!-- Settings sub-tabs -->
+          <div class="border-b border-gray-200 dark:border-gray-700 mb-4">
+            <nav class="-mb-px flex space-x-6">
+              <button
+                type="button"
+                onclick="switchSettingsGroup('hash')"
+                class="settings-group-btn py-2 px-1 border-b-2 font-medium text-sm transition-colors border-purple-500 text-purple-600"
+                data-group="hash"
+              >
+                Hash/File Scanning APIs
+              </button>
+              <button
+                type="button"
+                onclick="switchSettingsGroup('url')"
+                class="settings-group-btn py-2 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                data-group="url"
+              >
+                URL Scanning APIs
+              </button>
+            </nav>
+          </div>
+
+          <!-- Both groups stay in the DOM at all times (just hidden) so
+               switching sub-tabs never discards an unsaved value the user
+               already typed - mirrors the outer tab bar's hide/show pattern. -->
+          <div id="settings-keys-hash" class="space-y-4"></div>
+          <div id="settings-keys-url" class="space-y-4 hidden"></div>
           <button
             type="button"
             onclick="saveSettings()"
@@ -820,6 +902,7 @@
         </div>
       </div>
 
+      {% if search_type != 'url' %}
       <!-- First Row: VirusTotal, MetaDefender, OTX AlienVault -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
         <!-- VirusTotal Results -->
@@ -1715,6 +1798,408 @@
         </div>
         {% endif %}
       </div>
+      {% endif %}
+
+      <!-- Download Cross-Check (Advanced Options) - shown for either search
+           type, since it's the same VT relationship regardless of whether
+           the hash or the URL was the primary lookup. -->
+      {% if results.cross_check %}
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 mb-6 fade-in">
+        <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">🔗 Download Cross-Check</h3>
+        <p class="text-sm dark:text-gray-300">
+          Hash <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">{{ results.cross_check.hash }}</code>:
+          {% if results.cross_check.match == true %}
+          <span class="text-green-600 dark:text-green-400 font-medium">✔️ Match</span>
+          {% elif results.cross_check.match == false %}
+          <span class="text-yellow-600 dark:text-yellow-400 font-medium">⚠️ No match</span>
+          {% else %}
+          <span class="text-gray-500">Unavailable</span>
+          {% endif %}
+        </p>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">{{ results.cross_check.note }}</p>
+      </div>
+      {% endif %}
+
+      {% if search_type == 'url' %}
+      <!-- Composite Verdict Banner -->
+      {% if composite_verdict %}
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 mb-6 fade-in border-l-4 {% if composite_verdict.verdict == 'Whitelist' %}border-green-500{% elif composite_verdict.verdict == 'Block' %}border-red-500{% else %}border-yellow-500{% endif %}">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold {% if composite_verdict.verdict == 'Whitelist' %}bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200{% elif composite_verdict.verdict == 'Block' %}bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200{% else %}bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200{% endif %}">
+              {% if composite_verdict.verdict == 'Whitelist' %}✅{% elif composite_verdict.verdict == 'Block' %}🚫{% else %}⚠️{% endif %}
+              {{ composite_verdict.verdict }}
+            </span>
+            {% if composite_verdict.is_typosquat %}
+            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Possible brand lookalike/typosquat domain</p>
+            {% endif %}
+            {% if composite_verdict.favicon_confirms_clone %}
+            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Favicon is identical to the real brand's - likely a cloned phishing kit</p>
+            {% endif %}
+            {% if composite_verdict.is_homoglyph %}
+            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Domain uses lookalike (homoglyph) characters</p>
+            {% endif %}
+            {% if composite_verdict.is_abusive_hosting %}
+            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Hosted on infrastructure with a history of abuse reports</p>
+            {% endif %}
+            {% if composite_verdict.is_very_new_domain %}
+            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ Domain was registered very recently</p>
+            {% endif %}
+            {% if composite_verdict.redirects_off_domain %}
+            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ Redirects to a different domain before landing</p>
+            {% endif %}
+            {% if composite_verdict.has_url_heuristic_flags %}
+            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ URL structure looks suspicious - see the URL Structure Check below</p>
+            {% endif %}
+            {% if composite_verdict.download_content_mismatch %}
+            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ Download content doesn't match the expected file type</p>
+            {% endif %}
+          </div>
+          <div class="text-right text-sm">
+            <p class="text-gray-700 dark:text-gray-300">
+              <strong>Category:</strong> {{ composite_verdict.category }}
+              <span class="text-xs text-gray-400">({{ composite_verdict.category_confidence }} confidence)</span>
+            </p>
+            <p class="text-gray-700 dark:text-gray-300">
+              <strong>Certificate:</strong>
+              {% if composite_verdict.cert_status == 'pass' %}✔️ OK
+              {% elif composite_verdict.cert_status == 'warn' %}⚠️ Warning
+              {% elif composite_verdict.cert_status == 'fail' %}❌ Failed
+              {% else %}❓ Unknown{% endif %}
+            </p>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Certificate + Certificate Transparency -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        {% if results.certificate %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-gray-700 text-white p-4">
+            <h3 class="text-lg font-semibold">🔒 TLS Certificate</h3>
+          </div>
+          <div class="p-4">
+            {% set cert = results.certificate %}
+            {% if cert.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ cert.error }}</div>
+            {% else %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              <p><strong>Subject:</strong> {{ cert.subject_cn }}{% if cert.subject_org %} ({{ cert.subject_org }}){% endif %}</p>
+              <p><strong>Issuer:</strong> {{ cert.issuer_cn }}{% if cert.issuer_org %} ({{ cert.issuer_org }}){% endif %}</p>
+              <p><strong>Valid:</strong> {{ cert.not_before }} &rarr; {{ cert.not_after }}</p>
+              {% if cert.age_days is not none %}<p><strong>Cert age:</strong> {{ cert.age_days }} day(s)</p>{% endif %}
+              {% if not cert.trusted %}
+              <p class="text-red-600 dark:text-red-400">❌ Not trusted by the default certificate store</p>
+              {% endif %}
+              {% if cert.warning %}
+              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ cert.warning }}</p>
+              {% endif %}
+              <button
+                type="button"
+                onclick="runSSLLabsDeepDive('{{ search_value }}')"
+                class="mt-2 text-xs px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-600"
+              >
+                Run SSL Labs deep-dive grade (~1-2 min)
+              </button>
+              <div id="ssl-labs-result" class="text-sm mt-2"></div>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if results.cert_transparency %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-gray-700 text-white p-4">
+            <h3 class="text-lg font-semibold">
+              <a href="https://crt.sh/" target="_blank" class="hover:underline">📜 Certificate Transparency (crt.sh)</a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set ct = results.cert_transparency %}
+            {% if ct.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ ct.error }}</div>
+            {% else %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              <p><strong>Certificates on record:</strong> {{ ct.cert_count }}</p>
+              {% if ct.issuers %}<p><strong>Issuers seen:</strong> {{ ct.issuers|join(', ') }}</p>{% endif %}
+              {% if ct.context %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ ct.context }}</p>{% endif %}
+              {% if ct.report_link %}<a href="{{ ct.report_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline text-sm">🔗 View on crt.sh</a>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Domain Age (RDAP), Redirect Chain, Typosquat/brand check -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        {% if results.domain_age %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">📅 Domain Age</h3>
+          </div>
+          <div class="p-4">
+            {% set age = results.domain_age %}
+            {% if age.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ age.error }}</div>
+            {% elif age.not_found %}
+            <div class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ age.context or 'No RDAP record found' }}</em></div>
+            {% else %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              {% if age.registered_date %}
+              <p><strong>Registered:</strong> {{ age.registered_date }} ({{ age.age_days }} day(s) ago)</p>
+              {% endif %}
+              {% if age.registrar %}<p><strong>Registrar:</strong> {{ age.registrar }}</p>{% endif %}
+              {% if age.context %}<p>{{ age.context }}</p>{% endif %}
+              {% if age.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ age.warning }}</p>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if results.redirect_chain %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">↪️ Redirect Chain</h3>
+          </div>
+          <div class="p-4">
+            {% set rc = results.redirect_chain %}
+            {% if rc.error and not rc.chain %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ rc.error }}</div>
+            {% else %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              <p><strong>Hops:</strong> {{ rc.hops }}</p>
+              {% if rc.hops and rc.chain %}
+              <ol class="list-decimal list-inside text-xs break-all space-y-0.5">
+                {% for hop in rc.chain %}<li>{{ hop }}</li>{% endfor %}
+              </ol>
+              {% endif %}
+              {% if rc.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ rc.warning }}</p>{% endif %}
+              {% if rc.error %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ rc.error }}</p>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if results.typosquat %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">🪪 Brand Lookalike Check</h3>
+          </div>
+          <div class="p-4">
+            {% set ts = results.typosquat %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              {% if ts.is_known_brand %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Matches a known brand domain</span>
+              {% elif ts.warning %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Possible lookalike</span>
+              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ ts.warning }}</p>
+              {% else %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">{{ ts.context }}</span>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Favicon match, IDN/Homoglyph check, URL Structure heuristics -->
+      {% if results.favicon or results.idn_check or results.url_heuristics %}
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        {% if results.favicon %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">🖇️ Favicon Match</h3>
+          </div>
+          <div class="p-4">
+            {% set fav = results.favicon %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              {% if fav.matches_brand %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Matches {{ fav.matches_brand }}'s favicon exactly</span>
+              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ fav.warning }}</p>
+              {% elif fav.favicon_sha256 %}
+              <p class="text-gray-600 dark:text-gray-400">Favicon fingerprint: <code class="text-xs">{{ fav.favicon_sha256 }}</code></p>
+              {% else %}
+              <p class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ fav.context or 'No favicon found' }}</em></p>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        {% if results.idn_check %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">🔤 IDN / Homoglyph Check</h3>
+          </div>
+          <div class="p-4">
+            {% set idn = results.idn_check %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              <p><strong>Decoded:</strong> <span class="break-all">{{ idn.decoded }}</span></p>
+              {% if idn.warning %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Lookalike characters detected</span>
+              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ idn.warning }}</p>
+              {% else %}
+              <p>{{ idn.context }}</p>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        {% if results.url_heuristics %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">🧩 URL Structure Check</h3>
+          </div>
+          <div class="p-4">
+            {% set uh = results.url_heuristics %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              {% for flag in uh.flags %}
+              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ flag }}</p>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Download Content-Type check, Hosting Reputation (AbuseIPDB) -->
+      {% if results.download_content or results.hosting_reputation %}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        {% if results.download_content %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">📦 Download Content-Type Check</h3>
+          </div>
+          <div class="p-4">
+            {% set dc = results.download_content %}
+            {% if dc.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ dc.error }}</div>
+            {% else %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              <p><strong>Expected:</strong> a {{ dc.expected_extension }} file</p>
+              <p><strong>Server returned:</strong> {{ dc.content_type }}</p>
+              {% if dc.content_length_bytes %}<p><strong>Size:</strong> {{ '{:,}'.format(dc.content_length_bytes) }} bytes</p>{% endif %}
+              {% if dc.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ dc.warning }}</p>{% else %}<p class="text-green-600 dark:text-green-400">✔️ Content type matches</p>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if results.hosting_reputation %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-slate-700 text-white p-4">
+            <h3 class="text-lg font-semibold">
+              <a href="https://www.abuseipdb.com/" target="_blank" class="hover:underline">🌐 Hosting Reputation (AbuseIPDB)</a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set hr = results.hosting_reputation %}
+            {% if hr.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ hr.error }}</div>
+            {% else %}
+            <div class="space-y-1 text-sm dark:text-gray-300">
+              <p><strong>IP:</strong> {{ hr.ip }}</p>
+              <p><strong>Abuse confidence score:</strong> {{ hr.abuse_score }}%</p>
+              {% if hr.isp %}<p><strong>ISP:</strong> {{ hr.isp }}{% if hr.country %} ({{ hr.country }}){% endif %}</p>{% endif %}
+              <p><strong>Reports (90d):</strong> {{ hr.total_reports }}</p>
+              {% if hr.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ hr.warning }}</p>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- urlscan.io (own row - includes the screenshot) -->
+      {% if results.urlscan %}
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in mb-6">
+        <div class="bg-indigo-600 text-white p-4">
+          <h3 class="text-lg font-semibold">🖼️ urlscan.io</h3>
+        </div>
+        <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+          {% set data = results.urlscan %}
+          <div class="md:col-span-2 space-y-2 text-sm dark:text-gray-300">
+            {% if data.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ data.error }}</div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ data.context or 'Not scanned' }}</em></div>
+            {% else %}
+            {% if data.malicious %}
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Malicious</span>
+            {% else %}
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Clean / No threat detected</span>
+            {% endif %}
+            {% if data.final_url %}<p><strong>Final URL:</strong> {{ data.final_url }}</p>{% endif %}
+            {% if data.context %}<p>{{ data.context }}</p>{% endif %}
+            {% if data.threat_name %}<p><strong>Tags:</strong> {{ data.threat_name }}</p>{% endif %}
+            {% if data.report_link %}<a href="{{ data.report_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">🔗 View Full Report</a>{% endif %}
+            {% endif %}
+          </div>
+          <div>
+            {% if results.urlscan.screenshot_url %}
+            <img src="{{ results.urlscan.screenshot_url }}" alt="Screenshot" class="rounded border border-gray-200 dark:border-gray-700 w-full" loading="lazy" />
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Generic URL provider cards -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        {% for key, meta in [
+          ('virustotal', {'label': '🛡️ VirusTotal', 'color': 'bg-blue-600', 'link': 'https://www.virustotal.com/gui/home/url'}),
+          ('metadefender', {'label': '🔰 MetaDefender', 'color': 'bg-teal-600', 'link': 'https://metadefender.opswat.com/'}),
+          ('otx', {'label': '🌐 OTX AlienVault', 'color': 'bg-purple-600', 'link': 'https://otx.alienvault.com/'}),
+          ('urlhaus', {'label': '🧨 URLhaus', 'color': 'bg-orange-600', 'link': 'https://urlhaus.abuse.ch/'}),
+          ('openphish', {'label': '🎣 OpenPhish', 'color': 'bg-pink-600', 'link': 'https://openphish.com/'}),
+          ('ipqualityscore', {'label': '📊 IPQualityScore', 'color': 'bg-cyan-600', 'link': 'https://www.ipqualityscore.com/'}),
+          ('checkphish', {'label': '🕵️ CheckPhish', 'color': 'bg-fuchsia-600', 'link': 'https://checkphish.ai/'}),
+          ('hybrid_analysis', {'label': '🧪 Hybrid Analysis', 'color': 'bg-slate-600', 'link': 'https://www.hybrid-analysis.com/'}),
+        ] %}
+        {% if results[key] %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="{{ meta.color }} text-white p-4">
+            <h3 class="text-lg font-semibold">
+              <a href="{{ meta.link }}" target="_blank" class="hover:underline">{{ meta.label }}</a>
+            </h3>
+          </div>
+          <div class="p-4">
+            {% set data = results[key] %}
+            {% if data.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ data.error }}</div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ data.context or 'Not found / not yet scanned' }}</em></div>
+            {% else %}
+            <div class="space-y-2 text-sm dark:text-gray-300">
+              {% if data.malicious %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Malicious</span>
+              {% else %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Clean / No threat detected</span>
+              {% endif %}
+              {% if data.detection_ratio %}<p><strong>Detections:</strong> {{ data.detection_ratio }}</p>{% endif %}
+              {% if data.category %}<p><strong>Category:</strong> {{ data.category }}</p>{% endif %}
+              {% if data.signature %}<p><strong>Signature:</strong> {{ data.signature }}</p>{% endif %}
+              {% if data.threat_name %}<p><strong>Threat:</strong> {{ data.threat_name }}</p>{% endif %}
+              {% if data.context %}<p>{{ data.context }}</p>{% endif %}
+              {% if data.final_url and data.final_url != search_value %}<p class="text-xs text-yellow-600 dark:text-yellow-400">⚠️ Redirects to: {{ data.final_url }}</p>{% endif %}
+              {% if data.report_link %}<a href="{{ data.report_link }}" target="_blank" class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:underline text-sm">🔗 View Full Report</a>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
 
       {% endif %}
 
@@ -1844,6 +2329,14 @@
       // Start polling for terminal log output right away, regardless of
       // which tab is active, so nothing scanned is missed.
       startTerminalPolling();
+
+      // Grey out the main lookup box as soon as Advanced Options is opened
+      // (see updateMainInputState) - immediate visual feedback that it's
+      // about to take over, before the user's even typed anything into it.
+      const advancedOptionsEl = document.getElementById("advanced-options");
+      if (advancedOptionsEl) {
+        advancedOptionsEl.addEventListener("toggle", updateMainInputState);
+      }
 
       // Delegated handlers for the Digital Certificate tab's dynamically
       // rendered buttons - copy-field (data-copy) and CSV export
@@ -1990,6 +2483,66 @@
         switchTab("single");
       }
 
+      // Prevent piling up duplicate concurrent scans (a URL lookup can take
+      // up to ~2 minutes - without this, clicking "Lookup" again while
+      // waiting queues another full multi-provider scan on top of the
+      // first, which looks like the app is stuck rather than just slow).
+      function handleSingleLookupSubmit() {
+        const btn = document.getElementById("single-lookup-submit");
+        const notice = document.getElementById("single-lookup-wait-notice");
+        if (btn.disabled) return false; // already submitting - ignore repeat clicks/Enter presses
+
+        const mainInput = document.getElementById("file_hash");
+        const hashField = document.getElementById("cross_check_hash");
+        const urlField = document.getElementById("cross_check_url");
+
+        // If the main box is empty but Advanced Options has a value, promote
+        // whichever one makes sense as the primary lookup - prefer the URL
+        // (a URL lookup is the richer analysis, with the hash then serving
+        // as its cross-check) so the user isn't forced to retype either
+        // value into both places just because they filled in Advanced
+        // Options first.
+        if (!mainInput.value.trim()) {
+          if (urlField.value.trim()) {
+            mainInput.value = urlField.value.trim();
+          } else if (hashField.value.trim()) {
+            mainInput.value = hashField.value.trim();
+          } else {
+            showNotification("Enter a hash or URL - either above, or in Advanced Options", "error");
+            return false;
+          }
+          updateMainInputState();
+        }
+
+        btn.disabled = true;
+        btn.textContent = "⏳ Scanning...";
+        if (notice) notice.classList.remove("hidden");
+        return true; // let the real form POST/navigation proceed
+      }
+
+      // Greys out the main input whenever Advanced Options is supplying the
+      // search value instead (open with content, or the main box is empty
+      // while Advanced Options has something) - purely visual, the field
+      // stays enabled so handleSingleLookupSubmit() above can still
+      // populate it at submit time, and the user can always click back
+      // into it to type something and take back control.
+      function updateMainInputState() {
+        const mainInput = document.getElementById("file_hash");
+        const mainNote = document.getElementById("main-input-note");
+        const advancedOptions = document.getElementById("advanced-options");
+        const hashField = document.getElementById("cross_check_hash");
+        const urlField = document.getElementById("cross_check_url");
+        if (!mainInput || !mainNote || !advancedOptions || !hashField || !urlField) return;
+
+        const advancedHasContent = !!(hashField.value.trim() || urlField.value.trim());
+        const shouldGrey = !mainInput.value.trim() && (advancedHasContent || advancedOptions.open);
+
+        mainInput.classList.toggle("opacity-50", shouldGrey);
+        mainInput.classList.toggle("bg-gray-100", shouldGrey);
+        mainInput.classList.toggle("dark:bg-gray-800", shouldGrey);
+        mainNote.classList.toggle("hidden", !shouldGrey);
+      }
+
       // Bookmark functions
       async function bookmarkItem(type, value, title = "") {
         const formData = new FormData();
@@ -2096,6 +2649,39 @@
         });
       }
 
+      // On-demand SSL Labs deep-dive grade for the URL results panel
+      // (not run automatically - a fresh assessment takes 1-2 minutes).
+      async function runSSLLabsDeepDive(url) {
+        const out = document.getElementById("ssl-labs-result");
+        if (!out) return;
+        let hostname;
+        try {
+          hostname = new URL(url).hostname;
+        } catch (err) {
+          out.textContent = "Could not parse hostname from URL";
+          return;
+        }
+
+        out.textContent = "Running SSL Labs assessment (this can take 1-2 minutes)...";
+        try {
+          const response = await fetch(
+            `/api/ssl-labs-scan?hostname=${encodeURIComponent(hostname)}`
+          );
+          const data = await response.json();
+          if (!response.ok) {
+            out.textContent = `Error: ${data.detail || "SSL Labs request failed"}`;
+            return;
+          }
+          if (data.status === "pending") {
+            out.textContent = "Still assessing - try again in a minute.";
+            return;
+          }
+          out.innerHTML = `<strong>Grade: ${data.grade}</strong> — <a href="${data.report_link}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">Full report</a>`;
+        } catch (err) {
+          out.textContent = "Failed to run SSL Labs assessment";
+        }
+      }
+
       // Bulk file upload
       async function uploadBulkFile(event) {
         const file = event.target.files[0];
@@ -2182,56 +2768,94 @@
 
       // Settings tab: load current key status
       async function loadSettings() {
-        const container = document.getElementById("settings-keys");
-        container.innerHTML =
-          '<p class="text-sm text-gray-500 dark:text-gray-400">Loading...</p>';
+        ["hash", "url"].forEach((group) => {
+          document.getElementById(`settings-keys-${group}`).innerHTML =
+            '<p class="text-sm text-gray-500 dark:text-gray-400">Loading...</p>';
+        });
 
         try {
           const response = await fetch("/api/settings");
           const data = await response.json();
           renderSettings(data.keys || []);
         } catch (err) {
-          container.innerHTML =
-            '<p class="text-sm text-red-500">Failed to load settings</p>';
+          ["hash", "url"].forEach((group) => {
+            document.getElementById(`settings-keys-${group}`).innerHTML =
+              '<p class="text-sm text-red-500">Failed to load settings</p>';
+          });
         }
       }
 
+      // A key can belong to both groups (e.g. VirusTotal unlocks both a
+      // hash- and a URL-scanning provider) - it gets one row per group it's
+      // in, distinguished by a "-<group>" suffix on the element id, so
+      // switching sub-tabs never loses an in-progress edit (see below).
       function renderSettings(keys) {
-        const container = document.getElementById("settings-keys");
-        container.innerHTML = "";
+        ["hash", "url"].forEach((group) => {
+          const container = document.getElementById(`settings-keys-${group}`);
+          container.innerHTML = "";
 
-        keys.forEach((key) => {
-          const badgeClass = key.configured
-            ? "bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-            : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300";
-          const badgeText = key.configured ? "✔️ Configured" : "Not set";
+          keys
+            .filter((key) => (key.groups || []).includes(group))
+            .forEach((key) => {
+              const badgeClass = key.configured
+                ? "bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
+                : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300";
+              const badgeText = key.configured ? "✔️ Configured" : "Not set";
 
-          const row = document.createElement("div");
-          row.innerHTML = `
-            <div class="flex items-center justify-between mb-1">
-              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300" for="settings-${key.env_var}">${key.label}</label>
-              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${badgeClass}">${badgeText}</span>
-            </div>
-            <input
-              type="password"
-              id="settings-${key.env_var}"
-              data-env-var="${key.env_var}"
-              placeholder="${key.configured ? "Leave blank to keep saved key" : "Enter API key"}"
-              autocomplete="off"
-              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
-            />
-          `;
-          container.appendChild(row);
+              const row = document.createElement("div");
+              row.innerHTML = `
+                <div class="flex items-center justify-between mb-1">
+                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300" for="settings-${key.env_var}-${group}">${key.label}</label>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${badgeClass}">${badgeText}</span>
+                </div>
+                <input
+                  type="password"
+                  id="settings-${key.env_var}-${group}"
+                  data-env-var="${key.env_var}"
+                  placeholder="${key.configured ? "Leave blank to keep saved key" : "Enter API key"}"
+                  autocomplete="off"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
+                />
+              `;
+              container.appendChild(row);
+            });
+        });
+      }
+
+      // Settings sub-tabs: hide/show only (same pattern as the outer tab
+      // bar) - re-rendering only the active group would silently drop
+      // whatever the user typed into the other group before switching.
+      function switchSettingsGroup(group) {
+        ["hash", "url"].forEach((g) => {
+          document
+            .getElementById(`settings-keys-${g}`)
+            .classList.toggle("hidden", g !== group);
+        });
+
+        document.querySelectorAll(".settings-group-btn").forEach((btn) => {
+          const active = btn.dataset.group === group;
+          btn.classList.toggle("border-purple-500", active);
+          btn.classList.toggle("text-purple-600", active);
+          btn.classList.toggle("border-transparent", !active);
+          btn.classList.toggle("text-gray-500", !active);
         });
       }
 
       async function saveSettings() {
-        const formData = new FormData();
+        // A shared key (e.g. VirusTotal) has one input per group - merge
+        // them so a value typed in either tab is captured, and a blank
+        // duplicate never overwrites a value the user did type.
+        const values = new Map();
         document
-          .querySelectorAll("#settings-keys input[data-env-var]")
+          .querySelectorAll("#settings-keys-hash input[data-env-var], #settings-keys-url input[data-env-var]")
           .forEach((input) => {
-            formData.append(input.dataset.envVar, input.value);
+            if (input.value || !values.has(input.dataset.envVar)) {
+              values.set(input.dataset.envVar, input.value);
+            }
           });
+
+        const formData = new FormData();
+        values.forEach((value, envVar) => formData.append(envVar, value));
 
         try {
           const response = await fetch("/api/settings", {
