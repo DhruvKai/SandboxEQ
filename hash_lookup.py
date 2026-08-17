@@ -12,7 +12,7 @@ import aiohttp
 import json
 import ssl
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Callable, Optional
 import os
 from dotenv import load_dotenv
 from colorama import Fore, Style, init
@@ -936,6 +936,24 @@ class TriageSandboxAPI(BaseAPI):
         result = self._format_triage_results(overview_data, token, {})
         return {'status': 'done', 'result': result}
 
+# Mirrors url_lookup.py's PER_PROVIDER_TIMEOUT_SECONDS/OVERALL_TIMEOUT_SECONDS/
+# _bounded() - hash lookups previously had no timeout of any kind, so a
+# single hung provider could hang the whole scan indefinitely. Kept as a
+# separate copy rather than importing from url_lookup.py to avoid a circular
+# import (url_lookup.py already imports from this module).
+PER_PROVIDER_TIMEOUT_SECONDS = 110  # generous - covers Triage's ~90s detonation poll
+OVERALL_TIMEOUT_SECONDS = 130  # hard ceiling on the whole lookup, independent of any single provider
+
+
+async def _bounded(coro, timeout: float, timeout_message: str) -> Dict[str, Any]:
+    """Runs `coro` with a hard wall-clock ceiling. See url_lookup.py's
+    identical helper for the full rationale."""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        return {'error': timeout_message}
+
+
 class HashLookupTool:
     def __init__(self, log_sink=None):
         load_dotenv(config_store.get_config_path())
@@ -949,41 +967,65 @@ class HashLookupTool:
             'hybrid_analysis': HybridAnalysisAPI(),
             'triage_sandbox': TriageSandboxAPI(),
         }
-    
-    async def lookup_hash(self, file_hash: str) -> Dict[str, Any]:
+
+    async def lookup_hash(self, file_hash: str,
+                           on_result: Optional[Callable[[str, Any], None]] = None) -> Dict[str, Any]:
+        """`on_result(api_name, result)`, if given, fires the moment each
+        individual provider resolves (success or error) rather than only
+        after every provider is done - lets a caller (app.py's lookup
+        session) surface fast providers immediately instead of gating the
+        whole page behind the slowest one."""
         print('=' * 60)
         print(f"{Fore.CYAN}{Style.BRIGHT}HASH LOOKUP REPORT")
         print('=' * 60)
         print(f"Hash: {file_hash}")
         print(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print('=' * 60)
-        
+
+        api_results: Dict[str, Any] = {}
+
+        async def _track(api_name: str, api_instance) -> None:
+            try:
+                result = await _bounded(
+                    self._query_api(api_name, api_instance, file_hash),
+                    PER_PROVIDER_TIMEOUT_SECONDS,
+                    f"Timed out after {PER_PROVIDER_TIMEOUT_SECONDS}s waiting on this provider",
+                )
+            except Exception as e:
+                print(f"{Fore.RED}{api_name.upper()} Error: {str(e)}")
+                result = {'error': str(e)}
+            api_results[api_name] = result
+            if on_result is not None:
+                on_result(api_name, result)
+
         tasks = []
         for api_name, api_instance in self.apis.items():
             if api_instance.is_configured():
-                tasks.append(self._query_api(api_name, api_instance, file_hash))
+                tasks.append(_track(api_name, api_instance))
             else:
                 print(f"{Fore.YELLOW}{api_name.upper()} API key not configured - skipping")
-        
+
         if not tasks:
             print(f"{Fore.RED}No APIs configured. Please check your config.env file.")
             return {}
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        api_results = {}
-        
-        for i, (api_name, _) in enumerate(item for item in self.apis.items() if item[1].is_configured()):
-            result = results[i]
-            if isinstance(result, Exception):
-                print(f"{Fore.RED}{api_name.upper()} Error: {str(result)}")
-                api_results[api_name] = {'error': str(result)}
-            else:
-                api_results[api_name] = result
-        
+
+        try:
+            # Per-task timeout above should always fire first - this is a
+            # pure safety net so the scan can never hang past
+            # OVERALL_TIMEOUT_SECONDS no matter what. _track() already
+            # writes/reports each result as soon as its own task resolves,
+            # so this gather is only used to know when everything is done.
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=OVERALL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            pass
+
         print('=' * 60)
         print(f"{Fore.GREEN}{Style.BRIGHT}SCAN COMPLETE")
         print('=' * 60)
-        
+
         return api_results
     
     async def _query_api(self, api_name: str, api_instance, file_hash: str) -> Dict[str, Any]:

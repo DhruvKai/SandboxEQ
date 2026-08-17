@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -24,6 +24,7 @@ from url_lookup import (
     URLLookupTool, SSLLabsAPI, _is_valid_url,
     cross_check_url_and_hash, close_all as close_url_apis,
 )
+from ip_lookup import IPLookupTool, _is_valid_ip, normalize_ip
 import config_store
 from dotenv import load_dotenv
 
@@ -43,7 +44,12 @@ class InMemoryStorage:
         self.max_terminal_log = 500
 
         self.sandbox_sessions = {}
-    
+
+        # Single hash/URL lookup sessions (progressive/streaming results) -
+        # same uncapped, in-process, no-TTL convention as bulk_sessions and
+        # sandbox_sessions above; see those for the precedent.
+        self.lookup_sessions = {}
+
     def add_search_history(self, search_type: str, search_value: str, results_summary: str = None, threat_score: int = 0):
         """Add search to history."""
         entry = {
@@ -146,6 +152,10 @@ class ThreatAnalyzer:
     NON_SCORING_KEYS = {
         'certificate', 'cert_transparency', 'cross_check', 'domain_age', 'redirect_chain', 'typosquat',
         'idn_check', 'url_heuristics', 'favicon', 'download_content', 'hosting_reputation',
+        # IP lookup's informational-only panels - same reasoning as
+        # hosting_reputation/domain_age above (reputation scores/WHOIS
+        # fields, not a detection engine with a malicious/clean verdict).
+        'abuseipdb', 'ip_whois', 'geolocation',
     }
 
     @staticmethod
@@ -479,6 +489,9 @@ class SandboxUploader:
 
     async def process_upload(self, file_bytes: bytes, filename: str, services: List[str], session_id: str) -> None:
         file_hash = hashlib.sha256(file_bytes).hexdigest()
+        # Each new scan starts the Terminal tab fresh rather than piling up
+        # behind whatever the last scan (of any kind) left behind.
+        self.storage.clear_terminal_log()
         self.storage.add_terminal_entry('_scan_start', 'Scan', f"📄 {filename}\nSHA-256: {file_hash}")
 
         session = {
@@ -729,21 +742,184 @@ async def get_form(request: Request):
         "show_dashboard": False
     })
 
-@app.post("/lookup", response_class=HTMLResponse)
+def _lookup_template_context(session: Dict[str, Any]) -> Dict[str, Any]:
+    """Shared template fields for rendering a lookup session's current
+    (possibly still-partial) state - used both for the full page
+    (/lookup-result/{id}) and the polled results-only fragment
+    (/lookup-status/{id})."""
+    pending = [name for name in session['pending_providers'] if name not in session['results']]
+    # session['results'] can hold explicit None values (e.g. download_content
+    # resolving to "nothing to show" for a non-file URL) - that's meaningful
+    # for pending-tracking above (key present = done, regardless of value)
+    # but every template block downstream assumes a present key means a
+    # real result dict, same as the old code where such keys were simply
+    # never added. Filter them out here rather than guarding every {% if %}
+    # / {% for %} in the template against None.
+    visible_results = {k: v for k, v in session['results'].items() if v is not None}
+    return {
+        "results": visible_results,
+        "error": session.get('error_message'),
+        "search_value": session['search_value'],
+        "search_type": session['search_type'],
+        "threat_score": session.get('threat_score') or 0,
+        "threat_summary": session.get('threat_summary'),
+        "composite_verdict": session.get('composite_verdict'),
+        "show_dashboard": session['status'] != 'error',
+        "pending_providers": pending,
+        "lookup_status": session['status'],
+    }
+
+
+async def _run_hash_lookup_session(session_id: str, file_hash: str, cross_check_url: str,
+                                    lookup_tool: HashLookupTool) -> None:
+    """Background-task target for a hash lookup session - mirrors the old
+    synchronous /lookup route's hash branch, but writes into
+    storage.lookup_sessions as each provider finishes (via on_result)
+    instead of only after everything is done."""
+    session = storage.lookup_sessions[session_id]
+
+    def on_result(api_name: str, result: Any) -> None:
+        session['results'][api_name] = result
+
+    try:
+        await asyncio.wait_for(
+            lookup_tool.lookup_hash(file_hash, on_result=on_result),
+            timeout=150,
+        )
+        # Advanced Options' "Download URL to cross-check" - the reverse
+        # direction of the URL-side cross-check: same VT relationship,
+        # just entered from the hash side. Failure here must not discard an
+        # already-successful hash lookup - it only ever sets
+        # results['cross_check'], never raises past this point.
+        if cross_check_url.strip() and _is_valid_url(cross_check_url.strip()):
+            try:
+                cc = await asyncio.wait_for(
+                    cross_check_url_and_hash(cross_check_url.strip(), file_hash), timeout=30,
+                )
+            except Exception as e:
+                cc = {'hash': file_hash, 'match': None, 'note': f'Cross-check failed: {e or type(e).__name__}'}
+            session['results']['cross_check'] = cc
+
+        threat_score = ThreatAnalyzer.calculate_threat_score(session['results'])
+        summary = ThreatAnalyzer.generate_summary(session['results'])
+        storage.add_search_history('hash', file_hash, summary, threat_score)
+        session['threat_score'] = threat_score
+        session['threat_summary'] = summary
+    except Exception as e:
+        session['error_message'] = "Lookup timed out - one or more providers took too long to respond. Try again." \
+            if isinstance(e, asyncio.TimeoutError) else str(e)
+        session['status'] = 'error'
+    finally:
+        # Backfill anything that never reported (belt-and-suspenders on top
+        # of lookup_hash's own internal per-provider/overall timeouts) so
+        # the frontend's polling always sees every pending provider resolve
+        # and stops.
+        for name in session['pending_providers']:
+            session['results'].setdefault(name, {'error': 'Timed out waiting for this provider'})
+        if session['status'] != 'error':
+            session['status'] = 'completed'
+        for api in lookup_tool.apis.values():
+            await api.close_session()
+
+
+async def _run_url_lookup_session(session_id: str, url: str, cross_check_hash: str,
+                                   url_lookup_tool: URLLookupTool) -> None:
+    """Background-task target for a URL lookup session - see
+    _run_hash_lookup_session above for the hash-side equivalent."""
+    session = storage.lookup_sessions[session_id]
+
+    def on_result(key: str, value: Any) -> None:
+        session['results'][key] = value
+
+    try:
+        await asyncio.wait_for(
+            url_lookup_tool.lookup_url(url, cross_check_hash=cross_check_hash, on_result=on_result),
+            timeout=150,
+        )
+        threat_score = ThreatAnalyzer.calculate_threat_score(session['results'])
+        summary = ThreatAnalyzer.generate_summary(session['results'])
+        composite_verdict = CompositeVerdict.build(session['results'], threat_score)
+        storage.add_search_history('url', url, summary, threat_score)
+        session['threat_score'] = threat_score
+        session['threat_summary'] = summary
+        session['composite_verdict'] = composite_verdict
+    except Exception as e:
+        session['error_message'] = "Lookup timed out - one or more providers took too long to respond. Try again." \
+            if isinstance(e, asyncio.TimeoutError) else str(e)
+        session['status'] = 'error'
+    finally:
+        for name in session['pending_providers']:
+            session['results'].setdefault(name, {'error': 'Timed out waiting for this provider'})
+        if session['status'] != 'error':
+            session['status'] = 'completed'
+        await close_url_apis(url_lookup_tool)
+
+
+async def _run_ip_lookup_session(session_id: str, ip: str, ip_lookup_tool: IPLookupTool) -> None:
+    """Background-task target for an IP lookup session - see
+    _run_hash_lookup_session above for the pattern this mirrors. Simpler
+    than the hash/url drivers since IP lookups have no cross-check/composite
+    verdict concept."""
+    session = storage.lookup_sessions[session_id]
+
+    def on_result(key: str, value: Any) -> None:
+        session['results'][key] = value
+
+    try:
+        await asyncio.wait_for(
+            ip_lookup_tool.lookup_ip(ip, on_result=on_result),
+            timeout=150,
+        )
+        threat_score = ThreatAnalyzer.calculate_threat_score(session['results'])
+        summary = ThreatAnalyzer.generate_summary(session['results'])
+        storage.add_search_history('ip', ip, summary, threat_score)
+        session['threat_score'] = threat_score
+        session['threat_summary'] = summary
+    except Exception as e:
+        session['error_message'] = "Lookup timed out - one or more providers took too long to respond. Try again." \
+            if isinstance(e, asyncio.TimeoutError) else str(e)
+        session['status'] = 'error'
+    finally:
+        for name in session['pending_providers']:
+            session['results'].setdefault(name, {'error': 'Timed out waiting for this provider'})
+        if session['status'] != 'error':
+            session['status'] = 'completed'
+        await ip_lookup_tool.close_all()
+
+
+@app.post("/lookup")
 async def lookup_hash(
     request: Request,
+    background_tasks: BackgroundTasks,
     file_hash: str = Form(...),
     source_filename: str = Form(""),
     cross_check_hash: str = Form(""),
     cross_check_url: str = Form(""),
 ):
-    """Single hash/URL lookup with enhanced features."""
+    """Single hash/URL/IP lookup. Validates synchronously (unchanged), then
+    hands the real scan to a background task and redirects to
+    /lookup-result/{session_id} - the page renders immediately with a
+    spinner per expected provider and fills each one in as it finishes
+    (pollLookupSession in index.html), instead of the whole page waiting
+    for the slowest provider."""
     raw_value = file_hash.strip()
-    search_type = 'url' if raw_value.lower().startswith('http') else 'hash'
+    if raw_value.lower().startswith('http'):
+        search_type = 'url'
+    elif _is_valid_ip(raw_value):
+        search_type = 'ip'
+    else:
+        search_type = 'hash'  # anything else falls through to hash validation below
+
     # URLs are case-sensitive (paths, query params) - only hashes get
     # lowercased, and only hashes get a 'sha256:'-style label stripped
-    # (some tools/UIs prepend one when you copy a hash).
-    search_value = strip_hash_label(raw_value).lower() if search_type == 'hash' else raw_value
+    # (some tools/UIs prepend one when you copy a hash). IPs get their
+    # canonical string form (handles inconsistent IPv6 compression, etc.).
+    if search_type == 'hash':
+        search_value = strip_hash_label(raw_value).lower()
+    elif search_type == 'ip':
+        search_value = normalize_ip(raw_value)
+    else:
+        search_value = raw_value
 
     # Validate input
     if search_type == 'hash' and not _is_valid_hash(search_value):
@@ -769,84 +945,94 @@ async def lookup_hash(
         header = f"📄 {source_filename}\nSHA-256: {search_value}" if source_filename.strip() else f"{hash_algo_label(search_value)}: {search_value}"
     else:
         header = search_value
+    # Each new scan starts the Terminal tab fresh rather than piling up
+    # behind whatever the last scan (of any kind) left behind.
+    storage.clear_terminal_log()
     storage.add_terminal_entry('_scan_start', 'Scan', header)
 
-    lookup_tool = HashLookupTool(log_sink=storage.add_terminal_entry) if search_type == 'hash' else None
-    url_lookup_tool = URLLookupTool(log_sink=storage.add_terminal_entry) if search_type == 'url' else None
+    session_id = str(uuid.uuid4())
+    base_session = {
+        'search_type': search_type,
+        'search_value': search_value,
+        'results': {},
+        'status': 'processing',
+        'error_message': None,
+        'started_at': datetime.now().isoformat(),
+        'threat_score': None,
+        'threat_summary': None,
+        'composite_verdict': None,
+    }
 
-    try:
-        # Perform lookup
-        if search_type == 'hash':
-            results = await lookup_tool.lookup_hash(search_value)
-            # Advanced Options' "Download URL to cross-check" - the reverse
-            # direction of the URL-side cross-check: same VT relationship,
-            # just entered from the hash side. Failure here must not
-            # discard an already-successful hash lookup - it only ever
-            # sets results['cross_check'], never raises past this point.
-            if cross_check_url.strip() and _is_valid_url(cross_check_url.strip()):
-                try:
-                    results['cross_check'] = await asyncio.wait_for(
-                        cross_check_url_and_hash(cross_check_url.strip(), search_value), timeout=30,
-                    )
-                except Exception as e:
-                    results['cross_check'] = {'hash': search_value, 'match': None, 'note': f'Cross-check failed: {e or type(e).__name__}'}
-        else:
-            # Belt-and-suspenders on top of URLLookupTool's own internal
-            # per-provider/overall timeouts: this route must never hang the
-            # HTTP connection open indefinitely, no matter what.
-            results = await asyncio.wait_for(
-                url_lookup_tool.lookup_url(search_value, cross_check_hash=cross_check_hash),
-                timeout=150,
-            )
+    if search_type == 'hash':
+        lookup_tool = HashLookupTool(log_sink=storage.add_terminal_entry)
+        pending_providers = [name for name, api in lookup_tool.apis.items() if api.is_configured()]
+        if cross_check_url.strip() and _is_valid_url(cross_check_url.strip()):
+            pending_providers.append('cross_check')
+        storage.lookup_sessions[session_id] = {**base_session, 'pending_providers': pending_providers}
+        background_tasks.add_task(_run_hash_lookup_session, session_id, search_value, cross_check_url, lookup_tool)
+    elif search_type == 'ip':
+        ip_lookup_tool = IPLookupTool(log_sink=storage.add_terminal_entry)
+        pending_providers = [name for name, api in ip_lookup_tool.apis.items() if api.is_configured()]
+        storage.lookup_sessions[session_id] = {**base_session, 'pending_providers': pending_providers}
+        background_tasks.add_task(_run_ip_lookup_session, session_id, search_value, ip_lookup_tool)
+    else:
+        url_lookup_tool = URLLookupTool(log_sink=storage.add_terminal_entry)
+        parsed = urlparse(search_value)
+        hostname = parsed.hostname or parsed.netloc
+        pending_providers = [name for name, api in url_lookup_tool.apis.items() if api.is_configured()]
+        if hostname:
+            pending_providers += [
+                'certificate', 'cert_transparency', 'domain_age',
+                'redirect_chain', 'favicon', 'download_content',
+            ]
+            if url_lookup_tool.hosting_reputation_api.is_configured():
+                pending_providers.append('hosting_reputation')
+        if cross_check_hash.strip():
+            pending_providers.append('cross_check')
+        storage.lookup_sessions[session_id] = {**base_session, 'pending_providers': pending_providers}
+        background_tasks.add_task(_run_url_lookup_session, session_id, search_value, cross_check_hash, url_lookup_tool)
 
-        # Calculate threat score and summary
-        threat_score = ThreatAnalyzer.calculate_threat_score(results)
-        summary = ThreatAnalyzer.generate_summary(results)
-        composite_verdict = CompositeVerdict.build(results, threat_score) if search_type == 'url' else None
+    return RedirectResponse(f"/lookup-result/{session_id}", status_code=303)
 
-        # Add to search history
-        storage.add_search_history(search_type, search_value, summary, threat_score)
 
-        # Close API sessions
-        if lookup_tool is not None:
-            for api in lookup_tool.apis.values():
-                await api.close_session()
-        if url_lookup_tool is not None:
-            await close_url_apis(url_lookup_tool)
+@app.get("/lookup-result/{session_id}", response_class=HTMLResponse)
+async def lookup_result(request: Request, session_id: str):
+    """Renders the results page for a session started by POST /lookup -
+    possibly still mid-scan, in which case the page's inline script polls
+    /lookup-status/{session_id} to fill in the rest."""
+    session = storage.lookup_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Lookup session not found")
 
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "results": results,
-            "error": None,
-            "search_value": search_value,
-            "search_type": search_type,
-            "threat_score": threat_score,
-            "threat_summary": summary,
-            "composite_verdict": composite_verdict,
-            "history": storage.get_search_history(limit=10),
-            "bookmarks": storage.get_bookmarks(),
-            "show_dashboard": True
-        })
+    context = _lookup_template_context(session)
+    context.update({
+        "request": request,
+        "history": storage.get_search_history(limit=10),
+        "bookmarks": storage.get_bookmarks(),
+        "lookup_session_id": session_id,
+    })
+    return templates.TemplateResponse("index.html", context)
 
-    except Exception as e:
-        # Close sessions on error
-        if lookup_tool is not None:
-            for api in lookup_tool.apis.values():
-                await api.close_session()
-        if url_lookup_tool is not None:
-            await close_url_apis(url_lookup_tool)
 
-        error_message = "Lookup timed out - one or more providers took too long to respond. Try again." \
-            if isinstance(e, asyncio.TimeoutError) else str(e)
+@app.get("/lookup-status/{session_id}", response_class=HTMLResponse)
+async def lookup_status(request: Request, session_id: str):
+    """Polled by pollLookupSession() in index.html - returns just the
+    results section re-rendered with whatever the session currently has.
+    X-Lookup-Status tells the frontend when to stop polling entirely;
+    X-Lookup-Pending/X-Lookup-Total let it back off to a slower interval as
+    fewer providers are still outstanding, rather than polling every couple
+    seconds for the whole session just to wait on one slow straggler."""
+    session = storage.lookup_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Lookup session not found")
 
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "results": None,
-            "error": error_message,
-            "history": storage.get_search_history(limit=10),
-            "bookmarks": storage.get_bookmarks(),
-            "show_dashboard": False
-        })
+    context = _lookup_template_context(session)
+    context["request"] = request
+    response = templates.TemplateResponse("_results.html", context)
+    response.headers["X-Lookup-Status"] = session['status']
+    response.headers["X-Lookup-Pending"] = str(len(context["pending_providers"]))
+    response.headers["X-Lookup-Total"] = str(len(session['pending_providers']))
+    return response
 
 @app.post("/bulk-upload")
 async def bulk_upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)):

@@ -5,9 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SandBoxEQ</title>
     <!-- Also doubles as the desktop app's title-bar/taskbar icon: WebView2
-         applies the page favicon to the host window shortly after each
-         navigation (see desktop_app.py's _reassert_window_icon), so this
-         has to be the real app icon rather than a placeholder. -->
+         applies the page favicon to the host window itself after each
+         navigation, with no custom Python-side code needed - so this has
+         to be the real app icon rather than a placeholder. (An explicit
+         desktop_app.py-side re-assertion of window.native.Icon on every
+         navigation was tried and removed - it raced WebView2's own
+         favicon-to-icon assignment on the same WinForms property and
+         reproduced a "Not Responding" hang; see that commit's message.) -->
     <link rel="icon" type="image/x-icon" href="/static/icon.ico" />
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -247,7 +251,7 @@
                 for="file_hash"
                 class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Enter Hash (MD5, SHA1, SHA256) or URL:
+                Enter Hash (MD5, SHA1, SHA256), URL, or IP Address:
               </label>
               <div class="relative">
                 <input
@@ -256,7 +260,7 @@
                   name="file_hash"
                   oninput="document.getElementById('source_filename').value = ''; updateMainInputState()"
                   class="w-full px-3 py-2 pr-10 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-colors"
-                  placeholder="e.g., d41d8cd98f00b204e9800998ecf8427e or https://example.com"
+                  placeholder="e.g., d41d8cd98f00b204e9800998ecf8427e, https://example.com, or 8.8.8.8"
                 />
 
                 {% if history %}
@@ -370,8 +374,8 @@
               🔍 Lookup Hash/URL
             </button>
             <p id="single-lookup-wait-notice" class="hidden text-xs text-center text-gray-500 dark:text-gray-400">
-              Scanning... URL lookups can take up to ~2 minutes (some sandboxes actually detonate the page). Please
-              don't click Lookup again - this page will refresh automatically when it's done.
+              Taking you to the results page - fast providers will appear within a few seconds, slower ones
+              (some sandboxes actually detonate the page) fill in below as they finish, up to ~2 minutes.
             </p>
           </form>
 
@@ -390,12 +394,20 @@
             >
               Upload a file (hashed locally, file contents are never uploaded):
             </label>
-            <input
-              id="single-file-input"
-              type="file"
-              onchange="hashFileAndLookup(event)"
-              class="block w-full text-sm text-gray-700 dark:text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-purple-100 dark:file:bg-purple-900 file:text-purple-700 dark:file:text-purple-300 hover:file:bg-purple-200 dark:hover:file:bg-purple-800"
-            />
+            <div
+              id="single-file-dropzone"
+              ondragover="handleSingleFileDragOver(event)"
+              ondragleave="handleSingleFileDragLeave(event)"
+              ondrop="handleSingleFileDrop(event)"
+              class="rounded-md transition-colors"
+            >
+              <input
+                id="single-file-input"
+                type="file"
+                onchange="hashFileAndLookup(event)"
+                class="block w-full text-sm text-gray-700 dark:text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-purple-100 dark:file:bg-purple-900 file:text-purple-700 dark:file:text-purple-300 hover:file:bg-purple-200 dark:hover:file:bg-purple-800"
+              />
+            </div>
             <p id="single-file-status" class="text-xs text-gray-500 dark:text-gray-400 mt-2"></p>
           </div>
         </div>
@@ -609,7 +621,15 @@
 
         <!-- Terminal Tab -->
         <div id="terminal-tab" class="tab-content p-6 hidden">
-          <div class="flex items-center justify-end mb-3">
+          <div class="flex items-center justify-end gap-2 mb-3">
+            <button
+              type="button"
+              id="terminal-copy-btn"
+              onclick="copyTerminalLog()"
+              class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+            >
+              📋 Copy
+            </button>
             <button
               type="button"
               onclick="clearTerminalLog()"
@@ -800,1507 +820,23 @@
         {% endif %}
       </div>
 
-      <!-- Error Display -->
-      {% if error %}
-      <div
-        class="bg-red-100 dark:bg-red-900 border border-red-400 dark:border-red-600 text-red-700 dark:text-red-300 px-4 py-3 rounded mb-6 slide-up"
-      >
-        <strong class="font-bold">Error:</strong>
-        <span class="block sm:inline">{{ error }}</span>
+      <!-- Error Display & Results Display -->
+      <div id="results-container">
+      {% include "_results.html" %}
       </div>
-      {% endif %}
-
-      <!-- Results Display -->
-      {% if results %}
-
-      <!-- Enhanced Results Header with Threat Score -->
-      <div
-        class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6 slide-up"
-      >
-        <div
-          class="flex flex-col md:flex-row md:items-center md:justify-between gap-4"
-        >
-          <div class="flex-1">
-            <h2 class="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">
-              Analysis Results
-            </h2>
-            <div class="flex items-center gap-4">
-              <div class="flex items-center gap-2">
-                <span class="text-sm text-gray-600 dark:text-gray-400"
-                  >Query:</span
-                >
-                <code
-                  class="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-sm font-mono"
-                  >{{ search_value[:50] }}{% if search_value|length > 50 %}...{%
-                  endif %}</code
-                >
-                <button
-                  onclick="copyToClipboard('{{ search_value }}')"
-                  class="copy-btn text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-4 h-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div class="flex items-center gap-4">
-            <!-- Threat Score Display -->
-            <div class="text-center">
-              <div
-                class="threat-score-circle relative w-20 h-20 mx-auto mb-2 {% if threat_score >= 80 %}threat-high{% elif threat_score >= 50 %}threat-medium{% elif threat_score >= 20 %}threat-low{% else %}threat-clean{% endif %} rounded-full flex items-center justify-center text-white font-bold text-lg shadow-lg"
-              >
-                {{ threat_score }}
-              </div>
-              <p class="text-xs text-gray-600 dark:text-gray-400">
-                Threat Score
-              </p>
-            </div>
-
-            <!-- Action Buttons -->
-            <div class="flex gap-2">
-              <button
-                onclick="bookmarkItem('{{ search_type }}', '{{ search_value }}')"
-                class="px-3 py-2 bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 rounded-lg hover:bg-yellow-200 dark:hover:bg-yellow-800 transition-colors"
-                title="Bookmark"
-              >
-                <svg
-                  class="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
-                  ></path>
-                </svg>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Threat Summary -->
-        <div class="mt-4 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
-          <p class="text-sm font-medium text-gray-900 dark:text-gray-100">
-            {{ threat_summary }}
-          </p>
-        </div>
-      </div>
-
-      {% if search_type != 'url' %}
-      <!-- First Row: VirusTotal, MetaDefender, OTX AlienVault -->
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        <!-- VirusTotal Results -->
-        {% if results.virustotal %}
-        <div
-          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
-        >
-          <div class="bg-blue-600 text-white p-4">
-            <h3 class="text-lg font-semibold flex items-center">
-              <a
-                href="https://www.virustotal.com/gui/home/search"
-                target="_blank"
-                class="flex items-center hover:underline"
-              >
-                🛡️ VirusTotal
-                <svg
-                  class="w-4 h-4 ml-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results.virustotal %} {% if data.error %}
-            <div class="text-red-600 dark:text-red-400">
-              <strong>Error:</strong> {{ data.error }}
-            </div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400">
-              <em>ℹ️ Not found in database</em>
-            </div>
-            {% else %}
-            <div class="space-y-2">
-              <div>
-                {% if data.malicious %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
-                >
-                  ❌ Malicious
-                </span>
-                {% else %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-                >
-                  ✔️ Clean / No threat detected
-                </span>
-                {% endif %}
-              </div>
-
-              {% if data.detection_ratio %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Detections:</strong> {{ data.detection_ratio }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.detection_ratio }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.signature %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Signature:</strong> {{ data.signature }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.signature }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.report_link %}
-              <a
-                href="{{ data.report_link }}"
-                target="_blank"
-                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
-              >
-                🔗 View Full Report
-                <svg
-                  class="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- MetaDefender Results -->
-        {% if results.metadefender %}
-        <div
-          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
-        >
-          <div class="bg-orange-600 text-white p-4">
-            <h3 class="text-lg font-semibold flex items-center">
-              <a
-                href="https://metadefender.com/"
-                target="_blank"
-                class="flex items-center hover:underline"
-              >
-                🛡️ MetaDefender
-                <svg
-                  class="w-4 h-4 ml-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results.metadefender %} {% if data.error %}
-            <div class="text-red-600 dark:text-red-400">
-              <strong>Error:</strong> {{ data.error }}
-            </div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400">
-              <em>ℹ️ Not found in database</em>
-            </div>
-            {% else %}
-            <div class="space-y-3">
-              <!-- Main Status -->
-              <div>
-                {% if data.malicious %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
-                >
-                  ❌ Malicious
-                </span>
-                {% else %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-                >
-                  ✔️ Clean / No threat detected
-                </span>
-                {% endif %}
-              </div>
-
-              <!-- Traditional Scan Results -->
-              {% if data.scan_result %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Scan Result:</strong> {{ data.scan_result }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.scan_result }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.detection_ratio %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Detections:</strong> {{ data.detection_ratio }}
-              </p>
-              {% endif %}
-
-              <!-- ENHANCED: Adaptive Sandbox Results -->
-              {% if data.sandbox_result %}
-              <div class="border-t border-gray-200 dark:border-gray-600 pt-3">
-                <div class="flex items-center justify-between">
-                  <p class="text-sm dark:text-gray-300">
-                    <strong>🏥 Adaptive Sandbox:</strong>
-                    <span
-                      class="{% if 'Likely Malicious' in data.sandbox_result %}text-red-600 dark:text-red-400{% elif 'Clean' in data.sandbox_result %}text-green-600 dark:text-green-400{% else %}text-yellow-600 dark:text-yellow-400{% endif %}"
-                    >
-                      {{ data.sandbox_result }}
-                    </span>
-                  </p>
-                  <button
-                    onclick="copyToClipboard('{{ data.sandbox_result }}')"
-                    class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                  >
-                    <svg
-                      class="w-3 h-3"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                      ></path>
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              {% endif %}
-
-              <!-- Behavioral Indicators -->
-              {% if data.sandbox_behaviors %}
-              <div class="mt-2">
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  <strong>Behaviors:</strong>
-                  {% for behavior in data.sandbox_behaviors %}
-                  <span
-                    class="inline-block bg-gray-100 dark:bg-gray-700 rounded px-2 py-1 mr-1 mb-1"
-                    >{{ behavior }}</span
-                  >
-                  {% endfor %}
-                </p>
-              </div>
-              {% endif %}
-
-              <!-- File Information -->
-              {% if data.filename %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Filename:</strong> {{ data.filename }}
-              </p>
-              {% endif %} {% if data.file_type %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>File Type:</strong> {{ data.file_type }}
-              </p>
-              {% endif %} {% if data.signature %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Signature:</strong> {{ data.signature }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.signature }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.report_link %}
-              <a
-                href="{{ data.report_link }}"
-                target="_blank"
-                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
-              >
-                🔗 View Full Report
-                <svg
-                  class="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- OTX AlienVault Results -->
-        {% if results.otx %}
-        <div
-          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
-        >
-          <div class="bg-green-600 text-white p-4">
-            <h3 class="text-lg font-semibold flex items-center">
-              <a
-                href="https://otx.alienvault.com/"
-                target="_blank"
-                class="flex items-center hover:underline"
-              >
-                👁️ OTX AlienVault
-                <svg
-                  class="w-4 h-4 ml-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results.otx %} {% if data.error %}
-            <div class="text-red-600 dark:text-red-400">
-              <strong>Error:</strong> {{ data.error }}
-            </div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400">
-              <em>ℹ️ Not found in database</em>
-            </div>
-            {% else %}
-            <div class="space-y-2">
-              <div>
-                {% if data.malicious %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
-                >
-                  ❌ Malicious
-                </span>
-                {% else %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-                >
-                  ✔️ Clean / No threat detected
-                </span>
-                {% endif %}
-              </div>
-
-              {% if data.threat_name %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Threat:</strong> {{ data.threat_name }}
-              </p>
-              {% endif %} {% if data.context %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Context:</strong> {{ data.context }}
-              </p>
-              {% endif %} {% if data.report_link %}
-              <a
-                href="{{ data.report_link }}"
-                target="_blank"
-                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
-              >
-                🔗 View Full Report
-                <svg
-                  class="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-      </div>
-
-      <!-- Second Row: MalwareBazaar, ThreatFox, Hybrid Analysis, Triage Sandbox -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-6 mb-6">
-        <!-- MalwareBazaar Results -->
-        {% if results.malwarebazaar %}
-        <div
-          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
-        >
-          <div class="bg-red-600 text-white p-4">
-            <h3 class="text-lg font-semibold flex items-center">
-              <a
-                href="https://bazaar.abuse.ch/"
-                target="_blank"
-                class="flex items-center hover:underline"
-              >
-                🦠 MalwareBazaar
-                <svg
-                  class="w-4 h-4 ml-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results.malwarebazaar %} {% if data.error %}
-            <div class="text-red-600 dark:text-red-400">
-              <strong>Error:</strong> {{ data.error }}
-            </div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400">
-              <em>ℹ️ Not found in database</em>
-            </div>
-            {% else %}
-            <div class="space-y-2">
-              <div>
-                {% if data.malicious %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
-                >
-                  ❌ Malicious
-                </span>
-                {% else %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-                >
-                  ✔️ Clean / No threat detected
-                </span>
-                {% endif %}
-              </div>
-
-              {% if data.signature %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Signature:</strong> {{ data.signature }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.signature }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.threat %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Threat:</strong> {{ data.threat }}
-              </p>
-              {% endif %} {% if data.first_submission_date %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>First Seen:</strong> {{ data.first_submission_date }}
-              </p>
-              {% endif %} {% if data.report_link %}
-              <a
-                href="{{ data.report_link }}"
-                target="_blank"
-                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
-              >
-                🔗 View Full Report
-                <svg
-                  class="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- ThreatFox Results -->
-        {% if results.threatfox %}
-        <div
-          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
-        >
-          <div class="bg-orange-600 text-white p-4">
-            <h3 class="text-lg font-semibold flex items-center">
-              <a
-                href="https://threatfox.abuse.ch/"
-                target="_blank"
-                class="flex items-center hover:underline"
-              >
-                🦊 ThreatFox
-                <svg
-                  class="w-4 h-4 ml-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results.threatfox %} {% if data.error %}
-            <div class="text-red-600 dark:text-red-400">
-              <strong>Error:</strong> {{ data.error }}
-            </div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400">
-              <em>ℹ️ Not found in database</em>
-            </div>
-            {% else %}
-            <div class="space-y-2">
-              <div>
-                {% if data.malicious %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
-                >
-                  ❌ Malicious
-                </span>
-                {% else %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-                >
-                  ✔️ Clean / No threat detected
-                </span>
-                {% endif %}
-              </div>
-
-              {% if data.signature %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Signature:</strong> {{ data.signature }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.signature }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.threat %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Threat:</strong> {{ data.threat }}
-              </p>
-              {% endif %} {% if data.context %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Context:</strong> {{ data.context }}
-              </p>
-              {% endif %} {% if data.report_link %}
-              <a
-                href="{{ data.report_link }}"
-                target="_blank"
-                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
-              >
-                🔗 View Full Report
-                <svg
-                  class="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- Hybrid Analysis Results -->
-        {% if results.hybrid_analysis %}
-        <div
-          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
-        >
-          <div class="bg-purple-600 text-white p-4">
-            <h3 class="text-lg font-semibold flex items-center">
-              <a
-                href="https://www.hybrid-analysis.com/"
-                target="_blank"
-                class="flex items-center hover:underline"
-              >
-                🔬 Hybrid Analysis
-                <svg
-                  class="w-4 h-4 ml-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results.hybrid_analysis %} {% if data.error %}
-            <div class="text-red-600 dark:text-red-400">
-              <strong>Error:</strong> {{ data.error }}
-            </div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400">
-              <em>ℹ️ Not found in database</em>
-            </div>
-            {% else %}
-            <div class="space-y-2">
-              <div>
-                {% if data.malicious %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
-                >
-                  ❌ Malicious
-                </span>
-                {% else %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-                >
-                  ✔️ Clean / No threat detected
-                </span>
-                {% endif %}
-              </div>
-
-              {% if data.verdict %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Verdict:</strong> {{ data.verdict }}
-              </p>
-              {% endif %} {% if data.threat_score %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Threat Score:</strong> {{ data.threat_score }}/100
-              </p>
-              {% endif %} {% if data.signature %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Signature:</strong> {{ data.signature }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.signature }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.context %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Context:</strong> {{ data.context }}
-              </p>
-              {% endif %} {% if data.report_link %}
-              <a
-                href="{{ data.report_link }}"
-                target="_blank"
-                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
-              >
-                🔗 View Full Report
-                <svg
-                  class="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- Triage Sandbox Results -->
-        {% if results.triage_sandbox %}
-        <div
-          class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in"
-        >
-          <div class="bg-red-700 text-white p-4">
-            <h3 class="text-lg font-semibold flex items-center">
-              <a
-                href="https://tria.ge/"
-                target="_blank"
-                class="flex items-center hover:underline"
-              >
-                🏥 Triage Sandbox
-                <svg
-                  class="w-4 h-4 ml-2"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results.triage_sandbox %} {% if data.error %}
-            <div class="text-red-600 dark:text-red-400">
-              <strong>Error:</strong> {{ data.error }}
-            </div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400">
-              <em>ℹ️ Not found in database</em>
-            </div>
-            {% else %}
-            <div class="space-y-2">
-              <div>
-                {% if data.malicious %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200"
-                >
-                  ❌ Malicious (Score: {{ data.threat_score | default(0) }}/10)
-                </span>
-                {% else %}
-                <span
-                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200"
-                >
-                  ✔️ Clean / No threat detected
-                </span>
-                {% endif %}
-              </div>
-
-              {% if data.signature %}
-              <div class="flex items-center justify-between">
-                <p class="text-sm dark:text-gray-300">
-                  <strong>Signature:</strong> {{ data.signature }}
-                </p>
-                <button
-                  onclick="copyToClipboard('{{ data.signature }}')"
-                  class="copy-btn text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                >
-                  <svg
-                    class="w-3 h-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      stroke-width="2"
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    ></path>
-                  </svg>
-                </button>
-              </div>
-              {% endif %} {% if data.target %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Target:</strong> {{ data.target }}
-              </p>
-              {% endif %} {% if data.context %}
-              <p class="text-sm dark:text-gray-300">
-                <strong>Context:</strong> {{ data.context }}
-              </p>
-              {% endif %} {% if data.report_link %}
-              <a
-                href="{{ data.report_link }}"
-                target="_blank"
-                class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-sm"
-              >
-                🔗 View Full Report
-                <svg
-                  class="w-3 h-3 ml-1"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-2M14 4h6m0 0v6m0-6L10 14"
-                  ></path>
-                </svg>
-              </a>
-              {% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-      </div>
-      {% endif %}
-
-      <!-- Download Cross-Check (Advanced Options) - shown for either search
-           type, since it's the same VT relationship regardless of whether
-           the hash or the URL was the primary lookup. -->
-      {% if results.cross_check %}
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 mb-6 fade-in">
-        <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">🔗 Download Cross-Check</h3>
-        <p class="text-sm dark:text-gray-300">
-          Hash <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">{{ results.cross_check.hash }}</code>:
-          {% if results.cross_check.match == true %}
-          <span class="text-green-600 dark:text-green-400 font-medium">✔️ Match</span>
-          {% elif results.cross_check.match == false %}
-          <span class="text-yellow-600 dark:text-yellow-400 font-medium">⚠️ No match</span>
-          {% else %}
-          <span class="text-gray-500">Unavailable</span>
-          {% endif %}
-        </p>
-        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">{{ results.cross_check.note }}</p>
-      </div>
-      {% endif %}
-
-      {% if search_type == 'url' %}
-      <!-- Composite Verdict Banner -->
-      {% if composite_verdict %}
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 mb-6 fade-in border-l-4 {% if composite_verdict.verdict == 'Whitelist' %}border-green-500{% elif composite_verdict.verdict == 'Block' %}border-red-500{% else %}border-yellow-500{% endif %}">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold {% if composite_verdict.verdict == 'Whitelist' %}bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200{% elif composite_verdict.verdict == 'Block' %}bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200{% else %}bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200{% endif %}">
-              {% if composite_verdict.verdict == 'Whitelist' %}✅{% elif composite_verdict.verdict == 'Block' %}🚫{% else %}⚠️{% endif %}
-              {{ composite_verdict.verdict }}
-            </span>
-            {% if composite_verdict.is_typosquat %}
-            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Possible brand lookalike/typosquat domain</p>
-            {% endif %}
-            {% if composite_verdict.favicon_confirms_clone %}
-            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Favicon is identical to the real brand's - likely a cloned phishing kit</p>
-            {% endif %}
-            {% if composite_verdict.is_homoglyph %}
-            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Domain uses lookalike (homoglyph) characters</p>
-            {% endif %}
-            {% if composite_verdict.is_abusive_hosting %}
-            <p class="text-xs text-red-600 dark:text-red-400 mt-2">⚠️ Hosted on infrastructure with a history of abuse reports</p>
-            {% endif %}
-            {% if composite_verdict.is_very_new_domain %}
-            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ Domain was registered very recently</p>
-            {% endif %}
-            {% if composite_verdict.redirects_off_domain %}
-            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ Redirects to a different domain before landing</p>
-            {% endif %}
-            {% if composite_verdict.has_url_heuristic_flags %}
-            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ URL structure looks suspicious - see the URL Structure Check below</p>
-            {% endif %}
-            {% if composite_verdict.download_content_mismatch %}
-            <p class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">⚠️ Download content doesn't match the expected file type</p>
-            {% endif %}
-          </div>
-          <div class="text-right text-sm">
-            <p class="text-gray-700 dark:text-gray-300">
-              <strong>Category:</strong> {{ composite_verdict.category }}
-              <span class="text-xs text-gray-400">({{ composite_verdict.category_confidence }} confidence)</span>
-            </p>
-            <p class="text-gray-700 dark:text-gray-300">
-              <strong>Certificate:</strong>
-              {% if composite_verdict.cert_status == 'pass' %}✔️ OK
-              {% elif composite_verdict.cert_status == 'warn' %}⚠️ Warning
-              {% elif composite_verdict.cert_status == 'fail' %}❌ Failed
-              {% else %}❓ Unknown{% endif %}
-            </p>
-          </div>
-        </div>
-      </div>
-      {% endif %}
-
-      <!-- Certificate + Certificate Transparency -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        {% if results.certificate %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-gray-700 text-white p-4">
-            <h3 class="text-lg font-semibold">🔒 TLS Certificate</h3>
-          </div>
-          <div class="p-4">
-            {% set cert = results.certificate %}
-            {% if cert.error %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ cert.error }}</div>
-            {% else %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              <p><strong>Subject:</strong> {{ cert.subject_cn }}{% if cert.subject_org %} ({{ cert.subject_org }}){% endif %}</p>
-              <p><strong>Issuer:</strong> {{ cert.issuer_cn }}{% if cert.issuer_org %} ({{ cert.issuer_org }}){% endif %}</p>
-              <p><strong>Valid:</strong> {{ cert.not_before }} &rarr; {{ cert.not_after }}</p>
-              {% if cert.age_days is not none %}<p><strong>Cert age:</strong> {{ cert.age_days }} day(s)</p>{% endif %}
-              {% if not cert.trusted %}
-              <p class="text-red-600 dark:text-red-400">❌ Not trusted by the default certificate store</p>
-              {% endif %}
-              {% if cert.warning %}
-              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ cert.warning }}</p>
-              {% endif %}
-              <button
-                type="button"
-                onclick="runSSLLabsDeepDive('{{ search_value }}')"
-                class="mt-2 text-xs px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-600"
-              >
-                Run SSL Labs deep-dive grade (~1-2 min)
-              </button>
-              <div id="ssl-labs-result" class="text-sm mt-2"></div>
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        {% if results.cert_transparency %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-gray-700 text-white p-4">
-            <h3 class="text-lg font-semibold">
-              <a href="https://crt.sh/" target="_blank" class="hover:underline">📜 Certificate Transparency (crt.sh)</a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set ct = results.cert_transparency %}
-            {% if ct.error %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ ct.error }}</div>
-            {% else %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              <p><strong>Certificates on record:</strong> {{ ct.cert_count }}</p>
-              {% if ct.issuers %}<p><strong>Issuers seen:</strong> {{ ct.issuers|join(', ') }}</p>{% endif %}
-              {% if ct.context %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ ct.context }}</p>{% endif %}
-              {% if ct.report_link %}<a href="{{ ct.report_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline text-sm">🔗 View on crt.sh</a>{% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-      </div>
-
-      <!-- Domain Age (RDAP), Redirect Chain, Typosquat/brand check -->
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        {% if results.domain_age %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">📅 Domain Age</h3>
-          </div>
-          <div class="p-4">
-            {% set age = results.domain_age %}
-            {% if age.error %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ age.error }}</div>
-            {% elif age.not_found %}
-            <div class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ age.context or 'No RDAP record found' }}</em></div>
-            {% else %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              {% if age.registered_date %}
-              <p><strong>Registered:</strong> {{ age.registered_date }} ({{ age.age_days }} day(s) ago)</p>
-              {% endif %}
-              {% if age.registrar %}<p><strong>Registrar:</strong> {{ age.registrar }}</p>{% endif %}
-              {% if age.context %}<p>{{ age.context }}</p>{% endif %}
-              {% if age.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ age.warning }}</p>{% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        {% if results.redirect_chain %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">↪️ Redirect Chain</h3>
-          </div>
-          <div class="p-4">
-            {% set rc = results.redirect_chain %}
-            {% if rc.error and not rc.chain %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ rc.error }}</div>
-            {% else %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              <p><strong>Hops:</strong> {{ rc.hops }}</p>
-              {% if rc.hops and rc.chain %}
-              <ol class="list-decimal list-inside text-xs break-all space-y-0.5">
-                {% for hop in rc.chain %}<li>{{ hop }}</li>{% endfor %}
-              </ol>
-              {% endif %}
-              {% if rc.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ rc.warning }}</p>{% endif %}
-              {% if rc.error %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ rc.error }}</p>{% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        {% if results.typosquat %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">🪪 Brand Lookalike Check</h3>
-          </div>
-          <div class="p-4">
-            {% set ts = results.typosquat %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              {% if ts.is_known_brand %}
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Matches a known brand domain</span>
-              {% elif ts.warning %}
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Possible lookalike</span>
-              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ ts.warning }}</p>
-              {% else %}
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">{{ ts.context }}</span>
-              {% endif %}
-            </div>
-          </div>
-        </div>
-        {% endif %}
-      </div>
-
-      <!-- Favicon match, IDN/Homoglyph check, URL Structure heuristics -->
-      {% if results.favicon or results.idn_check or results.url_heuristics %}
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        {% if results.favicon %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">🖇️ Favicon Match</h3>
-          </div>
-          <div class="p-4">
-            {% set fav = results.favicon %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              {% if fav.matches_brand %}
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Matches {{ fav.matches_brand }}'s favicon exactly</span>
-              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ fav.warning }}</p>
-              {% elif fav.favicon_sha256 %}
-              <p class="text-gray-600 dark:text-gray-400">Favicon fingerprint: <code class="text-xs">{{ fav.favicon_sha256 }}</code></p>
-              {% else %}
-              <p class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ fav.context or 'No favicon found' }}</em></p>
-              {% endif %}
-            </div>
-          </div>
-        </div>
-        {% endif %}
-
-        {% if results.idn_check %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">🔤 IDN / Homoglyph Check</h3>
-          </div>
-          <div class="p-4">
-            {% set idn = results.idn_check %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              <p><strong>Decoded:</strong> <span class="break-all">{{ idn.decoded }}</span></p>
-              {% if idn.warning %}
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Lookalike characters detected</span>
-              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ idn.warning }}</p>
-              {% else %}
-              <p>{{ idn.context }}</p>
-              {% endif %}
-            </div>
-          </div>
-        </div>
-        {% endif %}
-
-        {% if results.url_heuristics %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">🧩 URL Structure Check</h3>
-          </div>
-          <div class="p-4">
-            {% set uh = results.url_heuristics %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              {% for flag in uh.flags %}
-              <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ flag }}</p>
-              {% endfor %}
-            </div>
-          </div>
-        </div>
-        {% endif %}
-      </div>
-      {% endif %}
-
-      <!-- Download Content-Type check, Hosting Reputation (AbuseIPDB) -->
-      {% if results.download_content or results.hosting_reputation %}
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        {% if results.download_content %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">📦 Download Content-Type Check</h3>
-          </div>
-          <div class="p-4">
-            {% set dc = results.download_content %}
-            {% if dc.error %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ dc.error }}</div>
-            {% else %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              <p><strong>Expected:</strong> a {{ dc.expected_extension }} file</p>
-              <p><strong>Server returned:</strong> {{ dc.content_type }}</p>
-              {% if dc.content_length_bytes %}<p><strong>Size:</strong> {{ '{:,}'.format(dc.content_length_bytes) }} bytes</p>{% endif %}
-              {% if dc.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ dc.warning }}</p>{% else %}<p class="text-green-600 dark:text-green-400">✔️ Content type matches</p>{% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-
-        {% if results.hosting_reputation %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="bg-slate-700 text-white p-4">
-            <h3 class="text-lg font-semibold">
-              <a href="https://www.abuseipdb.com/" target="_blank" class="hover:underline">🌐 Hosting Reputation (AbuseIPDB)</a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set hr = results.hosting_reputation %}
-            {% if hr.error %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ hr.error }}</div>
-            {% else %}
-            <div class="space-y-1 text-sm dark:text-gray-300">
-              <p><strong>IP:</strong> {{ hr.ip }}</p>
-              <p><strong>Abuse confidence score:</strong> {{ hr.abuse_score }}%</p>
-              {% if hr.isp %}<p><strong>ISP:</strong> {{ hr.isp }}{% if hr.country %} ({{ hr.country }}){% endif %}</p>{% endif %}
-              <p><strong>Reports (90d):</strong> {{ hr.total_reports }}</p>
-              {% if hr.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ hr.warning }}</p>{% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-      </div>
-      {% endif %}
-
-      <!-- urlscan.io (own row - includes the screenshot) -->
-      {% if results.urlscan %}
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in mb-6">
-        <div class="bg-indigo-600 text-white p-4">
-          <h3 class="text-lg font-semibold">🖼️ urlscan.io</h3>
-        </div>
-        <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-          {% set data = results.urlscan %}
-          <div class="md:col-span-2 space-y-2 text-sm dark:text-gray-300">
-            {% if data.error %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ data.error }}</div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ data.context or 'Not scanned' }}</em></div>
-            {% else %}
-            {% if data.malicious %}
-            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Malicious</span>
-            {% else %}
-            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Clean / No threat detected</span>
-            {% endif %}
-            {% if data.final_url %}<p><strong>Final URL:</strong> {{ data.final_url }}</p>{% endif %}
-            {% if data.context %}<p>{{ data.context }}</p>{% endif %}
-            {% if data.threat_name %}<p><strong>Tags:</strong> {{ data.threat_name }}</p>{% endif %}
-            {% if data.report_link %}<a href="{{ data.report_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">🔗 View Full Report</a>{% endif %}
-            {% endif %}
-          </div>
-          <div>
-            {% if results.urlscan.screenshot_url %}
-            <img src="{{ results.urlscan.screenshot_url }}" alt="Screenshot" class="rounded border border-gray-200 dark:border-gray-700 w-full" loading="lazy" />
-            {% endif %}
-          </div>
-        </div>
-      </div>
-      {% endif %}
-
-      <!-- Generic URL provider cards -->
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-        {% for key, meta in [
-          ('virustotal', {'label': '🛡️ VirusTotal', 'color': 'bg-blue-600', 'link': 'https://www.virustotal.com/gui/home/url'}),
-          ('metadefender', {'label': '🔰 MetaDefender', 'color': 'bg-teal-600', 'link': 'https://metadefender.opswat.com/'}),
-          ('otx', {'label': '🌐 OTX AlienVault', 'color': 'bg-purple-600', 'link': 'https://otx.alienvault.com/'}),
-          ('urlhaus', {'label': '🧨 URLhaus', 'color': 'bg-orange-600', 'link': 'https://urlhaus.abuse.ch/'}),
-          ('openphish', {'label': '🎣 OpenPhish', 'color': 'bg-pink-600', 'link': 'https://openphish.com/'}),
-          ('ipqualityscore', {'label': '📊 IPQualityScore', 'color': 'bg-cyan-600', 'link': 'https://www.ipqualityscore.com/'}),
-          ('checkphish', {'label': '🕵️ CheckPhish', 'color': 'bg-fuchsia-600', 'link': 'https://checkphish.ai/'}),
-          ('hybrid_analysis', {'label': '🧪 Hybrid Analysis', 'color': 'bg-slate-600', 'link': 'https://www.hybrid-analysis.com/'}),
-        ] %}
-        {% if results[key] %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
-          <div class="{{ meta.color }} text-white p-4">
-            <h3 class="text-lg font-semibold">
-              <a href="{{ meta.link }}" target="_blank" class="hover:underline">{{ meta.label }}</a>
-            </h3>
-          </div>
-          <div class="p-4">
-            {% set data = results[key] %}
-            {% if data.error %}
-            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ data.error }}</div>
-            {% elif data.not_found %}
-            <div class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ data.context or 'Not found / not yet scanned' }}</em></div>
-            {% else %}
-            <div class="space-y-2 text-sm dark:text-gray-300">
-              {% if data.malicious %}
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Malicious</span>
-              {% else %}
-              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Clean / No threat detected</span>
-              {% endif %}
-              {% if data.detection_ratio %}<p><strong>Detections:</strong> {{ data.detection_ratio }}</p>{% endif %}
-              {% if data.category %}<p><strong>Category:</strong> {{ data.category }}</p>{% endif %}
-              {% if data.signature %}<p><strong>Signature:</strong> {{ data.signature }}</p>{% endif %}
-              {% if data.threat_name %}<p><strong>Threat:</strong> {{ data.threat_name }}</p>{% endif %}
-              {% if data.context %}<p>{{ data.context }}</p>{% endif %}
-              {% if data.final_url and data.final_url != search_value %}<p class="text-xs text-yellow-600 dark:text-yellow-400">⚠️ Redirects to: {{ data.final_url }}</p>{% endif %}
-              {% if data.report_link %}<a href="{{ data.report_link }}" target="_blank" class="inline-flex items-center text-blue-600 dark:text-blue-400 hover:underline text-sm">🔗 View Full Report</a>{% endif %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
-        {% endfor %}
-      </div>
-      {% endif %}
-
-      {% endif %}
-
-      <!-- API Health Dashboard (shows when requested) -->
-      <div
-        id="api-health-dashboard"
-        class="hidden bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6"
-      >
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
-          🏥 API Health Status
-        </h3>
-        <div
-          id="api-health-content"
-          class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
-        >
-          <!-- API health cards will be populated here -->
-        </div>
-      </div>
-
-      <!-- Threat Summary Dashboard -->
-      {% if show_dashboard %}
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 slide-up">
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
-          📊 Threat Intelligence Summary
-        </h3>
-
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <div class="text-center">
-            <div
-              class="w-16 h-16 mx-auto mb-2 {% if threat_score >= 80 %}bg-red-500{% elif threat_score >= 50 %}bg-orange-500{% elif threat_score >= 20 %}bg-yellow-500{% else %}bg-green-500{% endif %} rounded-full flex items-center justify-center text-white font-bold text-xl"
-            >
-              {{ threat_score }}
-            </div>
-            <p class="text-sm text-gray-600 dark:text-gray-400">
-              Overall Score
-            </p>
-          </div>
-
-          <div class="text-center">
-            <div class="text-2xl font-bold text-blue-600 dark:text-blue-400">
-              {{ results|length }}
-            </div>
-            <p class="text-sm text-gray-600 dark:text-gray-400">APIs Checked</p>
-          </div>
-
-          <div class="text-center">
-            <div class="text-2xl font-bold text-red-600 dark:text-red-400">
-              {% set malicious_count = results.values() |
-              selectattr('malicious', 'equalto', true) | list | length %} {{
-              malicious_count }}
-            </div>
-            <p class="text-sm text-gray-600 dark:text-gray-400">
-              Malicious Detections
-            </p>
-          </div>
-
-          <div class="text-center">
-            <div class="text-2xl font-bold text-green-600 dark:text-green-400">
-              {% set clean_count = results.values() | rejectattr('malicious',
-              'equalto', true) | rejectattr('error') | rejectattr('not_found') |
-              list | length %} {{ clean_count }}
-            </div>
-            <p class="text-sm text-gray-600 dark:text-gray-400">
-              Clean Reports
-            </p>
-          </div>
-        </div>
-
-        <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
-          <h4 class="font-semibold text-gray-900 dark:text-gray-100 mb-2">
-            API Response Summary
-          </h4>
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
-            {% for api_name, result in results.items() %}
-            <div class="flex items-center gap-2 text-sm">
-              {% if result.get('error') %}
-              <span class="w-3 h-3 bg-red-500 rounded-full"></span>
-              <span class="text-gray-600 dark:text-gray-400"
-                >{{ api_name.title() }}: Error</span
-              >
-              {% elif result.get('not_found') %}
-              <span class="w-3 h-3 bg-gray-400 rounded-full"></span>
-              <span class="text-gray-600 dark:text-gray-400"
-                >{{ api_name.title() }}: Not Found</span
-              >
-              {% elif result.get('malicious') %}
-              <span class="w-3 h-3 bg-red-500 rounded-full"></span>
-              <span class="text-gray-600 dark:text-gray-400"
-                >{{ api_name.title() }}: Malicious</span
-              >
-              {% else %}
-              <span class="w-3 h-3 bg-green-500 rounded-full"></span>
-              <span class="text-gray-600 dark:text-gray-400"
-                >{{ api_name.title() }}: Clean</span
-              >
-              {% endif %}
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
+      {% if lookup_session_id and lookup_status == 'processing' %}
+      <script>
+        // pollLookupSession() itself is defined further down the page, in
+        // the main <script> block after </footer> - deferring the call to
+        // DOMContentLoaded (rather than calling it inline right here)
+        // guarantees that block has already run first, regardless of
+        // where in the document this trigger happens to sit. Calling it
+        // inline at this point would throw a silent ReferenceError (the
+        // function doesn't exist yet) and polling would just never start.
+        document.addEventListener("DOMContentLoaded", function () {
+          pollLookupSession("{{ lookup_session_id }}");
+        });
+      </script>
       {% endif %}
     </main>
 
@@ -2925,11 +1461,42 @@
         }
       }
 
+      async function copyTerminalLog() {
+        const output = document.getElementById("terminal-log-output");
+        const btn = document.getElementById("terminal-copy-btn");
+        if (!output) return;
+
+        const text = output.textContent || "";
+        if (!text.trim() || text === "Waiting for scan output...") {
+          showNotification("Nothing to copy yet", "error");
+          return;
+        }
+
+        try {
+          await navigator.clipboard.writeText(text);
+          if (btn) {
+            const original = btn.textContent;
+            btn.textContent = "✅ Copied!";
+            setTimeout(() => { btn.textContent = original; }, 1500);
+          }
+          showNotification("Terminal output copied to clipboard", "success");
+        } catch (err) {
+          showNotification("Copy failed - clipboard access was blocked", "error");
+        }
+      }
+
       // File upload -> local SHA-256 -> reuse the existing /lookup form
       async function hashFileAndLookup(event) {
         const file = event.target.files[0];
         if (!file) return;
+        await processSingleFile(file);
+      }
 
+      // Shared by both entry points for the "hash a local file" control -
+      // the native file-picker input's onchange (above) and drag-and-drop
+      // (below) - so a dropped file goes through exactly the same hashing/
+      // cert-analysis/submit path a clicked-and-browsed one does.
+      async function processSingleFile(file) {
         const statusEl = document.getElementById("single-file-status");
         statusEl.textContent = `Hashing ${file.name}...`;
 
@@ -2965,6 +1532,31 @@
           statusEl.textContent = "Failed to hash file";
           showNotification("Failed to hash file", "error");
         }
+      }
+
+      // Drag-and-drop for the single-file dropzone above. dragover must
+      // preventDefault() or the browser refuses to fire drop at all
+      // (default behavior for a dropped file is to navigate the tab to it).
+      // Uses ring/background rather than border/padding for the active-drag
+      // highlight so nothing reflows - the dropzone stays exactly as
+      // compact as the plain file input alone at rest.
+      const SINGLE_FILE_DROPZONE_ACTIVE_CLASSES = ["ring-2", "ring-purple-500", "bg-purple-50", "dark:bg-purple-950"];
+
+      function handleSingleFileDragOver(event) {
+        event.preventDefault();
+        event.currentTarget.classList.add(...SINGLE_FILE_DROPZONE_ACTIVE_CLASSES);
+      }
+
+      function handleSingleFileDragLeave(event) {
+        event.currentTarget.classList.remove(...SINGLE_FILE_DROPZONE_ACTIVE_CLASSES);
+      }
+
+      async function handleSingleFileDrop(event) {
+        event.preventDefault();
+        event.currentTarget.classList.remove(...SINGLE_FILE_DROPZONE_ACTIVE_CLASSES);
+        const file = event.dataTransfer.files && event.dataTransfer.files[0];
+        if (!file) return;
+        await processSingleFile(file);
       }
 
       // Digital Certificate tab -> parse the Authenticode signature fully
@@ -3061,6 +1653,61 @@
         } catch (err) {
           // Keep polling - transient network errors shouldn't stop the loop
         }
+      }
+
+      // Polls the single-lookup results page (hash or URL) so provider
+      // cards fill in as each one finishes, instead of the whole page
+      // waiting for the slowest provider. Mirrors pollSandboxStatus above:
+      // rebuild the results section from scratch every poll rather than
+      // diffing individual cards in JS - the server keeps owning all the
+      // per-provider markup via the same Jinja partial used on first load.
+      //
+      // Adaptive backoff (a recursive setTimeout, not a fixed setInterval):
+      // most providers land within the first few seconds, so poll quickly
+      // at first, then back off as fewer are still outstanding - once
+      // you're down to the last one or two slow stragglers (urlscan.io,
+      // sandbox detonation, ...) there's no point hammering the server
+      // every couple seconds waiting on them.
+      const LOOKUP_POLL_STAGES = [
+        { minDoneRatio: 0.0, delayMs: 2000 },
+        { minDoneRatio: 0.4, delayMs: 5000 },
+        { minDoneRatio: 0.8, delayMs: 7000 },
+      ];
+      let lookupPollTimeout = null;
+      function pollLookupSession(sessionId) {
+        if (lookupPollTimeout) clearTimeout(lookupPollTimeout);
+        const container = document.getElementById("results-container");
+
+        const nextDelay = (doneRatio) => {
+          let delay = LOOKUP_POLL_STAGES[0].delayMs;
+          for (const stage of LOOKUP_POLL_STAGES) {
+            if (doneRatio >= stage.minDoneRatio) delay = stage.delayMs;
+          }
+          return delay;
+        };
+
+        const tick = async () => {
+          try {
+            const response = await fetch(`/lookup-status/${sessionId}`);
+            const html = await response.text();
+            if (container) container.innerHTML = html;
+
+            if (response.headers.get("X-Lookup-Status") !== "processing") {
+              lookupPollTimeout = null;
+              return; // done - stop polling entirely
+            }
+
+            const total = parseInt(response.headers.get("X-Lookup-Total") || "0", 10);
+            const pending = parseInt(response.headers.get("X-Lookup-Pending") || "0", 10);
+            const doneRatio = total > 0 ? (total - pending) / total : 0;
+            lookupPollTimeout = setTimeout(tick, nextDelay(doneRatio));
+          } catch (err) {
+            // Transient network error - keep polling, but back off rather
+            // than retrying immediately into whatever's failing
+            lookupPollTimeout = setTimeout(tick, 5000);
+          }
+        };
+        tick(); // don't wait for the first update
       }
 
       function renderSandboxStatus(session) {

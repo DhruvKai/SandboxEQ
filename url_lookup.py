@@ -23,7 +23,7 @@ import socket
 import ssl
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import quote, urljoin, urlparse
 
 import aiohttp
@@ -594,7 +594,12 @@ class URLScanIOAPI(BaseAPI):
             return {'not_found': True, 'context': 'Scan submitted but no result URL returned'}
 
         data = None
-        for _ in range(12):  # urlscan scans typically finish in 10-20s; allow up to ~1 min
+        # urlscan scans typically finish in 10-20s, but complex/slow-loading
+        # pages can take noticeably longer on urlscan's own end - give it up
+        # to ~100s (20 * 5s) before giving up, staying just under this
+        # provider's PER_PROVIDER_TIMEOUT_SECONDS=110s budget so _bounded()
+        # never has to cut this loop off mid-poll.
+        for _ in range(20):
             await asyncio.sleep(5)
             async with session.get(result_api_url) as response:
                 if response.status == 200:
@@ -941,6 +946,18 @@ def _vcard_fn(vcard) -> Optional[str]:
     return None
 
 
+def _vcard_email(vcard) -> Optional[str]:
+    """Pull the 'email' property out of an RDAP jCard array - same shape as
+    _vcard_fn above, different property name."""
+    try:
+        for entry in vcard[1]:
+            if entry[0] == 'email':
+                return entry[3]
+    except Exception:
+        pass
+    return None
+
+
 class DomainAgeAPI:
     """Free, keyless domain-registration-age lookup via RDAP - the
     structured-JSON, IANA-bootstrapped successor to WHOIS. No API key, no
@@ -989,12 +1006,29 @@ class DomainAgeAPI:
 
         events = {e.get('eventAction'): e.get('eventDate') for e in data.get('events', []) if e.get('eventAction')}
         registered = events.get('registration')
+        expiration = events.get('expiration')
+        last_changed = events.get('last changed')
 
         registrar = None
+        registrar_abuse_email = None
         for entity in data.get('entities', []):
-            if 'registrar' in (entity.get('roles') or []):
+            roles = entity.get('roles') or []
+            if 'registrar' in roles:
                 registrar = _vcard_fn(entity.get('vcardArray')) or entity.get('handle')
+                # The registrar's own entity sometimes nests an "abuse"-role
+                # sub-entity with a contact email - useful for reporting
+                # abuse on a malicious domain. Registrant/admin/tech contact
+                # details are essentially always redacted for privacy under
+                # modern RDAP policy, so this is usually the only reachable
+                # contact on the record.
+                for sub in entity.get('entities', []):
+                    if 'abuse' in (sub.get('roles') or []):
+                        registrar_abuse_email = _vcard_email(sub.get('vcardArray'))
+                        break
                 break
+
+        nameservers = [ns.get('ldhName') for ns in data.get('nameservers', []) if ns.get('ldhName')]
+        status = data.get('status') or []
 
         result = {'domain': domain}
         if registered:
@@ -1007,8 +1041,26 @@ class DomainAgeAPI:
                     result['warning'] = f'Domain registered only {age_days} day(s) ago'
             except Exception:
                 pass
+        if expiration:
+            try:
+                exp_dt = datetime.fromisoformat(expiration.replace('Z', '+00:00'))
+                result['expiration_date'] = exp_dt.strftime('%Y-%m-%d')
+            except Exception:
+                pass
+        if last_changed:
+            try:
+                chg_dt = datetime.fromisoformat(last_changed.replace('Z', '+00:00'))
+                result['last_changed_date'] = chg_dt.strftime('%Y-%m-%d')
+            except Exception:
+                pass
         if registrar:
             result['registrar'] = registrar
+        if registrar_abuse_email:
+            result['registrar_abuse_email'] = registrar_abuse_email
+        if nameservers:
+            result['nameservers'] = nameservers
+        if status:
+            result['status'] = status
         if not result.get('registered_date'):
             result['context'] = "Registration date not exposed by this domain's RDAP record"
         return result
@@ -1281,13 +1333,21 @@ class HostingReputationAPI(BaseAPI):
         self.base_url = 'https://api.abuseipdb.com/api/v2/check'
 
     async def check(self, hostname: str) -> Dict[str, Any]:
+        """Resolves hostname -> IP, then delegates to check_ip() below.
+        Used by the URL lookup's 'hosting reputation' extra."""
         try:
             loop = asyncio.get_event_loop()
             addr_infos = await loop.getaddrinfo(hostname, None)
             ip = addr_infos[0][4][0]
         except Exception as e:
             return {'error': f'Could not resolve {hostname}: {_exc_text(e)}'}
+        return await self.check_ip(ip)
 
+    async def check_ip(self, ip: str) -> Dict[str, Any]:
+        """Queries AbuseIPDB directly for an already-known IP - used both by
+        check() above (URL lookups, after resolving a hostname) and
+        ip_lookup.py's IPLookupTool (direct IP lookups, no resolution
+        needed)."""
         session = await self._get_session()
         headers = {'Key': self.api_key, 'Accept': 'application/json'}
         params = {'ipAddress': ip, 'maxAgeInDays': '90'}
@@ -1403,9 +1463,12 @@ class URLLookupTool:
             'urlhaus': URLhausAPI(),
             'hybrid_analysis': HybridAnalysisURLAPI(),
             'openphish': OpenPhishAPI(),
-            'ipqualityscore': IPQualityScoreAPI(),
             'urlscan': URLScanIOAPI(),
             'checkphish': CheckPhishAPI(),
+            # IPQualityScoreAPI() deliberately not registered here - the
+            # free tier's credit balance runs out fast ("insufficient
+            # credits" errors), so it wasn't producing usable results.
+            # Class left below in case a paid/refreshed key gets added back.
         }
         self.cert_transparency_api = CertTransparencyAPI()
         self.domain_age_api = DomainAgeAPI()
@@ -1414,17 +1477,38 @@ class URLLookupTool:
         self.download_content_checker = DownloadContentChecker()
         self.hosting_reputation_api = HostingReputationAPI()
 
-    async def lookup_url(self, url: str, cross_check_hash: str = "") -> Dict[str, Any]:
+    async def lookup_url(self, url: str, cross_check_hash: str = "",
+                          on_result: Optional[Callable[[str, Any], None]] = None) -> Dict[str, Any]:
+        """`on_result(key, result)`, if given, fires the moment each
+        individual provider/check resolves (success, error, or - for
+        download_content - a deliberate "nothing to show" None) rather than
+        only after everything is done, so a caller can surface fast results
+        immediately instead of gating the whole page behind the slowest
+        provider (e.g. urlscan.io's ~60s poll, Triage's sandbox detonation)."""
         parsed = urlparse(url)
         hostname = parsed.hostname or parsed.netloc
+        api_results: Dict[str, Any] = {}
+
+        def _set(key: str, value: Any) -> None:
+            if value is not None:  # download_content reports "nothing to show" as None for a non-file-looking URL
+                api_results[key] = value
+            if on_result is not None:
+                on_result(key, value)
+
+        async def _track(key: str, coro) -> None:
+            try:
+                result = await coro
+            except Exception as e:
+                result = {'error': str(e)}
+            _set(key, result)
 
         names = [name for name, api in self.apis.items() if api.is_configured()]
-        tasks = [
-            _bounded(
+        gather_targets = [
+            _track(name, _bounded(
                 self._query_api(name, self.apis[name], url),
                 PER_PROVIDER_TIMEOUT_SECONDS,
                 f"Timed out after {PER_PROVIDER_TIMEOUT_SECONDS}s waiting on this provider",
-            )
+            ))
             for name in names
         ]
 
@@ -1432,84 +1516,70 @@ class URLLookupTool:
         # than after the gather, like typosquat used to be) since
         # FaviconChecker needs typosquat's closest_brand match to decide
         # whether there's a real-brand favicon worth comparing against.
+        # Reported immediately since nothing needs to be awaited for these.
         typosquat_result = check_typosquat(hostname) if hostname else None
         url_heuristics_result = check_url_heuristics(url)
         idn_result = check_idn_homoglyph(hostname) if hostname else None
+        if typosquat_result is not None:
+            _set('typosquat', typosquat_result)
+        if idn_result is not None and idn_result.get('is_idn'):
+            _set('idn_check', idn_result)
+        if url_heuristics_result['flags'] or url_heuristics_result['is_shortener']:
+            _set('url_heuristics', url_heuristics_result)
 
         loop = asyncio.get_event_loop()
-        # (extra_key, task) pairs for the keyless/extra checks - built as a
-        # list rather than named variables so adding another one later is a
-        # one-line change, not a repeat of the offset-tracking below.
-        extras = []
         if hostname:
-            extras.append(('certificate', _bounded(
+            gather_targets.append(_track('certificate', _bounded(
                 loop.run_in_executor(None, CertificateChecker.check, hostname),
                 20, "Timed out establishing a TLS connection",
             )))
-            extras.append(('cert_transparency', _bounded(
+            gather_targets.append(_track('cert_transparency', _bounded(
                 self.cert_transparency_api.query(hostname),
                 20, "Timed out querying Certspotter/crt.sh",
             )))
-            extras.append(('domain_age', _bounded(
+            gather_targets.append(_track('domain_age', _bounded(
                 self.domain_age_api.query(hostname),
                 15, "Timed out querying RDAP",
             )))
-            extras.append(('redirect_chain', _bounded(
+            gather_targets.append(_track('redirect_chain', _bounded(
                 self.redirect_checker.trace(url),
                 20, "Timed out tracing redirects",
             )))
-            extras.append(('favicon', _bounded(
+            gather_targets.append(_track('favicon', _bounded(
                 self.favicon_checker.check(hostname, typosquat_result),
                 15, "Timed out fetching favicon",
             )))
-            extras.append(('download_content', _bounded(
+            gather_targets.append(_track('download_content', _bounded(
                 self.download_content_checker.check(url),
                 15, "Timed out checking download Content-Type",
             )))
             if self.hosting_reputation_api.is_configured():
-                extras.append(('hosting_reputation', _bounded(
+                gather_targets.append(_track('hosting_reputation', _bounded(
                     self.hosting_reputation_api.check(hostname),
                     15, "Timed out querying AbuseIPDB",
                 )))
 
-        gather_targets = list(tasks) + [t for _, t in extras]
+        if cross_check_hash.strip():
+            gather_targets.append(_track('cross_check', _bounded(
+                cross_check_url_and_hash(url, cross_check_hash, vt_api=self.apis.get('virustotal')),
+                30, "Cross-check timed out",
+            )))
 
         try:
             # Per-task timeouts above should always fire first - this is a
             # pure safety net so the request can never hang past
             # OVERALL_TIMEOUT_SECONDS no matter what (this is exactly the
             # protection that was missing when this hung indefinitely).
-            results_list = await asyncio.wait_for(
+            # _track() already wrote/reported each result as soon as its own
+            # task resolved, so this gather is only used to know when
+            # everything is done - a timeout here just abandons whatever
+            # hasn't reported yet; the caller backfills those.
+            await asyncio.wait_for(
                 asyncio.gather(*gather_targets, return_exceptions=True),
                 timeout=OVERALL_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            results_list = [Exception(f"Lookup timed out after {OVERALL_TIMEOUT_SECONDS}s") for _ in gather_targets]
-
-        api_results = {}
-        for i, name in enumerate(names):
-            result = results_list[i]
-            api_results[name] = {'error': str(result)} if isinstance(result, Exception) else result
-
-        for i, (key, _) in enumerate(extras, start=len(names)):
-            result = results_list[i]
-            if isinstance(result, Exception):
-                api_results[key] = {'error': str(result)}
-            elif result is not None:  # download_content returns None for a non-file-looking URL
-                api_results[key] = result
-
-        if typosquat_result is not None:
-            api_results['typosquat'] = typosquat_result
-        if idn_result is not None and idn_result.get('is_idn'):
-            api_results['idn_check'] = idn_result
-        if url_heuristics_result['flags'] or url_heuristics_result['is_shortener']:
-            api_results['url_heuristics'] = url_heuristics_result
-
-        if cross_check_hash.strip():
-            api_results['cross_check'] = await _bounded(
-                cross_check_url_and_hash(url, cross_check_hash, vt_api=self.apis.get('virustotal')),
-                30, "Cross-check timed out",
-            )
+            pass
 
         # Only the keyless "extra check" sessions are closed here - the
         # provider (self.apis) sessions are deliberately left open for the
