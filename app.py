@@ -25,6 +25,8 @@ from url_lookup import (
     cross_check_url_and_hash, close_all as close_url_apis,
 )
 from ip_lookup import IPLookupTool, _is_valid_ip, normalize_ip
+import ioc_tools
+import subnet_tools
 import config_store
 from dotenv import load_dotenv
 
@@ -156,6 +158,11 @@ class ThreatAnalyzer:
         # hosting_reputation/domain_age above (reputation scores/WHOIS
         # fields, not a detection engine with a malicious/clean verdict).
         'abuseipdb', 'ip_whois', 'geolocation',
+        # Shodan InternetDB (open ports/CVEs) and GreyNoise (scanner noise vs
+        # targeted) are context, not a verdict on maliciousness - a "malicious"
+        # GreyNoise IP is a mass scanner, which says little about whether it
+        # is a threat to *this* network. Shown as cards, kept out of the score.
+        'shodan_internetdb', 'greynoise',
     }
 
     @staticmethod
@@ -902,7 +909,11 @@ async def lookup_hash(
     spinner per expected provider and fills each one in as it finishes
     (pollLookupSession in index.html), instead of the whole page waiting
     for the slowest provider."""
-    raw_value = file_hash.strip()
+    # Analysts paste defanged indicators (hxxps://evil[.]com, 8[.]8[.]8[.]8) straight
+    # from reports and emails - undo that first so type detection just works.
+    # A no-op for anything that was never defanged.
+    raw_value = ioc_tools.refang(file_hash.strip())
+    cross_check_url = ioc_tools.refang(cross_check_url)
     if raw_value.lower().startswith('http'):
         search_type = 'url'
     elif _is_valid_ip(raw_value):
@@ -1156,6 +1167,7 @@ async def save_settings(
     URLSCAN_API_KEY: str = Form(""),
     CHECKPHISH_API_KEY: str = Form(""),
     ABUSEIPDB_API_KEY: str = Form(""),
+    GREYNOISE_API_KEY: str = Form(""),
 ):
     """Save API keys to config.env. Blank fields leave the existing key untouched."""
     updates = {
@@ -1170,6 +1182,7 @@ async def save_settings(
         "URLSCAN_API_KEY": URLSCAN_API_KEY,
         "CHECKPHISH_API_KEY": CHECKPHISH_API_KEY,
         "ABUSEIPDB_API_KEY": ABUSEIPDB_API_KEY,
+        "GREYNOISE_API_KEY": GREYNOISE_API_KEY,
     }
     updated_keys = config_store.write_keys(updates)
 
@@ -1190,6 +1203,45 @@ async def ssl_labs_scan(hostname: str):
         raise HTTPException(status_code=502, detail=str(e))
     finally:
         await ssl_labs.close_session()
+
+# --- Tools tab: offline subnet calculator + IOC extractor -------------------
+# Pure computation (no provider calls, no API keys), so plain sync handlers.
+
+MAX_IOC_INPUT_CHARS = 1_000_000
+
+
+@app.get("/api/subnet")
+def api_subnet(cidr: str, split: Optional[int] = None, contains: str = ""):
+    """Subnet breakdown for one CIDR/IP/mask, with an optional split into
+    smaller subnets (split=<new prefix length>) and an optional "is this IP
+    or CIDR inside it?" check (contains=...)."""
+    try:
+        return subnet_tools.calculate(cidr, split_prefix=split, contains=contains)
+    except subnet_tools.SubnetError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/subnet/summarize")
+def api_subnet_summarize(text: str = Form("")):
+    """Merge a list of CIDRs / IPs / start-end ranges into the fewest CIDR blocks."""
+    try:
+        return subnet_tools.summarize(text)
+    except subnet_tools.SubnetError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/ioc/extract")
+def api_ioc_extract(text: str = Form("")):
+    """Extract URLs/IPs/domains/emails/hashes/CVEs from free text (defanged or
+    not), plus refanged and defanged copies of the text itself."""
+    if len(text) > MAX_IOC_INPUT_CHARS:
+        return JSONResponse(
+            {"error": f"Text is too large ({len(text):,} characters) - the limit is {MAX_IOC_INPUT_CHARS:,}"},
+            status_code=413)
+    if not text.strip():
+        return JSONResponse({"error": "Paste some text to extract indicators from"}, status_code=400)
+    return ioc_tools.extract_iocs(text)
+
 
 @app.get("/api/terminal-log")
 async def get_terminal_log(since: int = 0):

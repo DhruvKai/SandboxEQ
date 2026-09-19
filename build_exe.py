@@ -31,9 +31,19 @@ PyInstaller.__main__.run([
     '--hidden-import=multipart',
     '--hidden-import=config_store',
     '--hidden-import=url_lookup',
+    '--hidden-import=ip_lookup',
+    '--hidden-import=ioc_tools',
+    '--hidden-import=subnet_tools',
     '--hidden-import=truststore',
     '--hidden-import=webview',
     '--collect-all=webview',
     '--collect-all=clr_loader',
+    # The app itself never imports these, but PyInstaller pulls them in
+    # transitively from whatever else is installed in the build environment
+    # (pygments -> PIL -> numpy) and they more than doubled the .exe (~20 MB
+    # -> ~44 MB). Excluded so the size doesn't depend on the build machine.
+    '--exclude-module=numpy',
+    '--exclude-module=PIL',
+    '--exclude-module=pygments',
     # Add more if you use more packages
 ])

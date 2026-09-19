@@ -1,20 +1,19 @@
 /*
- * Client-side Authenticode / PE digital-signature parser + renderer.
- *
- * Everything here runs entirely in the browser. The selected .exe/.dll never
- * leaves the machine - only the parsed certificate/signature metadata is
- * rendered to the page, mirroring the "hashed locally" promise made
- * elsewhere in this app for the Single Lookup file input.
+ * Client-side Authenticode digital-signature parser + renderer for Windows
+ * PE files (.exe/.dll/.sys/...) and Windows Installer packages (.msi).
  *
  * Covers:
  *   - Locating the WIN_CERTIFICATE table in the PE (supports dual SHA-1 +
  *     SHA-256 signing, i.e. multiple embedded signature blobs)
+ *   - For an MSI (an OLE compound file, not a PE): reading the hidden
+ *     "DigitalSignature" stream, which holds the same PKCS#7 blob
  *   - Parsing the embedded PKCS#7/Authenticode SignedData structure with a
  *     minimal hand-rolled DER reader (no external dependencies)
  *   - Walking the certificate chain (signer -> intermediates -> root)
  *   - Extracting the RFC3161 (or legacy) counter-signature timestamp
- *   - Recomputing the Authenticode page-hash and comparing it to the
- *     digest embedded in the signature, to flag tampering after signing
+ *   - Recomputing the file digest (Authenticode page-hash for a PE, the MSI
+ *     stream-walk digest for an MSI) and comparing it to the digest embedded
+ *     in the signature, to flag tampering after signing
  */
 (function (global) {
   'use strict';
@@ -550,7 +549,7 @@
 
   function findPeCertBlobs(bytes) {
     if (bytes.length < 0x40 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
-      throw new Error('Not a PE file (missing "MZ" header) - select an .exe, .dll or similar');
+      throw new Error('Unsupported file - select a Windows executable (.exe, .dll, .sys, ...) or an installer (.msi)');
     }
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const eLfanew = dv.getUint32(0x3c, true);
@@ -616,6 +615,216 @@
     return bytesToHex(new Uint8Array(digest));
   }
 
+  // ===================== MSI (OLE compound file) =====================
+
+  // A .msi is not a PE: it's an OLE Compound File (a FAT-like filesystem in
+  // a file), and its Authenticode signature is the raw PKCS#7 blob stored in
+  // the hidden root stream "DigitalSignature" (no WIN_CERTIFICATE
+  // header). Modern signtool also writes "MsiDigitalSignatureEx", a
+  // prehash of the package metadata, which is folded into the file digest.
+
+  const CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+  const CFB_MAX_REGULAR_SECTOR = 0xfffffffa;
+  const CFB_NOSTREAM = 0xffffffff;
+  const MSI_SIGNATURE_STREAM = 'DigitalSignature';
+  const MSI_SIGNATURE_EX_STREAM = 'MsiDigitalSignatureEx';
+  const DIGEST_BYTE_LENGTHS = { 'SHA-1': 20, 'SHA-256': 32, 'SHA-384': 48, 'SHA-512': 64 };
+
+  function isCompoundFile(bytes) {
+    return bytes.length >= 512 && CFB_MAGIC.every((b, i) => bytes[i] === b);
+  }
+
+  function concatBytes(parts) {
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const out = new Uint8Array(total);
+    let pos = 0;
+    for (const p of parts) {
+      out.set(p, pos);
+      pos += p.length;
+    }
+    return out;
+  }
+
+  function parseCompoundFile(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const sectorShift = dv.getUint16(0x1e, true);
+    const miniShift = dv.getUint16(0x20, true);
+    if (sectorShift !== 9 && sectorShift !== 12) throw new Error('Unsupported compound-file sector size');
+    const sectorSize = 1 << sectorShift;
+    const miniSectorSize = 1 << miniShift;
+    const numFatSectors = dv.getUint32(0x2c, true);
+    const dirStart = dv.getUint32(0x30, true);
+    const miniCutoff = dv.getUint32(0x38, true);
+    const miniFatStart = dv.getUint32(0x3c, true);
+    const difatStart = dv.getUint32(0x44, true);
+    const numDifat = dv.getUint32(0x48, true);
+    const corrupt = () => new Error('Corrupt compound file');
+
+    // Sector n lives at (n + 1) * sectorSize - the header takes the first sector.
+    const sectorOffset = (n) => {
+      const off = (n + 1) * sectorSize;
+      if (n > CFB_MAX_REGULAR_SECTOR || off >= bytes.length) throw corrupt();
+      return off;
+    };
+
+    // The FAT's own sector list: 109 entries in the header, then a chain of DIFAT sectors.
+    const fatSectorIds = [];
+    for (let i = 0; i < 109; i++) fatSectorIds.push(dv.getUint32(0x4c + i * 4, true));
+    for (let s = difatStart, i = 0; i < numDifat && s <= CFB_MAX_REGULAR_SECTOR; i++) {
+      const off = sectorOffset(s);
+      for (let j = 0; j < sectorSize / 4 - 1; j++) fatSectorIds.push(dv.getUint32(off + j * 4, true));
+      s = dv.getUint32(off + sectorSize - 4, true);
+    }
+    const perSector = sectorSize / 4;
+    const fat = new Uint32Array(numFatSectors * perSector);
+    fatSectorIds.slice(0, numFatSectors).forEach((sid, i) => {
+      const off = sectorOffset(sid);
+      for (let j = 0; j < perSector; j++) fat[i * perSector + j] = dv.getUint32(off + j * 4, true);
+    });
+
+    const readChain = (start) => {
+      const parts = [];
+      let s = start;
+      for (let guard = 0; s <= CFB_MAX_REGULAR_SECTOR; guard++) {
+        if (guard > fat.length || s >= fat.length) throw corrupt();
+        const off = sectorOffset(s);
+        parts.push(bytes.subarray(off, Math.min(off + sectorSize, bytes.length)));
+        s = fat[s];
+      }
+      return concatBytes(parts);
+    };
+
+    const dirBytes = readChain(dirStart);
+    const dirView = new DataView(dirBytes.buffer, dirBytes.byteOffset, dirBytes.byteLength);
+    const entries = [];
+    for (let o = 0; o + 128 <= dirBytes.length; o += 128) {
+      const nameLen = Math.max(0, Math.min(dirView.getUint16(o + 0x40, true) - 2, 62)); // drop the UTF-16 terminator
+      const nameRaw = dirBytes.subarray(o, o + nameLen);
+      let name = '';
+      for (let k = 0; k + 1 < nameLen; k += 2) name += String.fromCharCode(nameRaw[k] | (nameRaw[k + 1] << 8));
+      // The size field is 64-bit, but 512-byte-sector files only use the low 32 bits.
+      const sizeLo = dirView.getUint32(o + 0x78, true);
+      const sizeHi = dirView.getUint32(o + 0x7c, true);
+      entries.push({
+        name, nameRaw,
+        type: dirBytes[o + 0x42], // 1 storage, 2 stream, 5 root
+        left: dirView.getUint32(o + 0x44, true),
+        right: dirView.getUint32(o + 0x48, true),
+        child: dirView.getUint32(o + 0x4c, true),
+        clsid: dirBytes.subarray(o + 0x50, o + 0x60),
+        start: dirView.getUint32(o + 0x74, true),
+        size: sectorSize === 512 ? sizeLo : sizeHi * 4294967296 + sizeLo,
+      });
+    }
+    const root = entries[0];
+    if (!root || root.type !== 5) throw corrupt();
+
+    // Streams smaller than the cutoff (4096) live in the "mini stream", a
+    // container stream owned by the root entry, addressed via the mini FAT.
+    const miniStream = root.size > 0 ? readChain(root.start).subarray(0, root.size) : new Uint8Array(0);
+    let miniFat = new Uint32Array(0);
+    if (miniFatStart <= CFB_MAX_REGULAR_SECTOR) {
+      const mf = readChain(miniFatStart);
+      miniFat = new Uint32Array(mf.length >> 2);
+      const mfView = new DataView(mf.buffer, mf.byteOffset, mf.byteLength);
+      for (let i = 0; i < miniFat.length; i++) miniFat[i] = mfView.getUint32(i * 4, true);
+    }
+
+    const readStream = (entry) => {
+      let data;
+      if (entry.size < miniCutoff) {
+        const parts = [];
+        let s = entry.start;
+        for (let guard = 0; s <= CFB_MAX_REGULAR_SECTOR; guard++) {
+          if (guard > miniFat.length || s >= miniFat.length) throw corrupt();
+          parts.push(miniStream.subarray(s * miniSectorSize, (s + 1) * miniSectorSize));
+          s = miniFat[s];
+        }
+        data = concatBytes(parts);
+      } else {
+        data = readChain(entry.start);
+      }
+      if (data.length < entry.size) throw corrupt();
+      return data.subarray(0, entry.size);
+    };
+
+    // Children of a storage form a red-black tree via left/right siblings.
+    const children = (entry) => {
+      const out = [];
+      const stack = [];
+      const seen = new Set();
+      let cur = entry.child;
+      for (;;) {
+        while (cur !== CFB_NOSTREAM && cur < entries.length && !seen.has(cur)) {
+          seen.add(cur);
+          stack.push(cur);
+          cur = entries[cur].left;
+        }
+        if (!stack.length) break;
+        const id = stack.pop();
+        out.push(entries[id]);
+        cur = entries[id].right;
+      }
+      return out;
+    };
+
+    const findRootStream = (name) => children(root).find((e) => e.type === 2 && e.name === name) || null;
+    return { root, children, readStream, findRootStream };
+  }
+
+  // Human label from the root storage's CLSID: {000C1084-...} is a Windows
+  // Installer package, {000C1086-...} a patch, {000C1082-...} a transform.
+  function describeCompoundFile(root) {
+    const c = root.clsid;
+    if (c[1] === 0x10 && c[2] === 0x0c && c[3] === 0x00) {
+      if (c[0] === 0x84) return 'MSI - Windows Installer package (OLE compound file)';
+      if (c[0] === 0x86) return 'MSP - Windows Installer patch (OLE compound file)';
+      if (c[0] === 0x82) return 'MST - Windows Installer transform (OLE compound file)';
+    }
+    return 'OLE compound file';
+  }
+
+  function compareNameBytes(a, b) {
+    const x = a.nameRaw;
+    const y = b.nameRaw;
+    const n = Math.min(x.length, y.length);
+    for (let i = 0; i < n; i++) if (x[i] !== y[i]) return x[i] - y[i];
+    return x.length - y.length;
+  }
+
+  // The MSI file digest, as reproduced against real signtool-signed packages:
+  // [MsiDigitalSignatureEx bytes, if present] + every stream's contents in
+  // the order given by comparing the raw UTF-16LE entry names (recursing into
+  // sub-storages, and following each storage's children with its 16-byte
+  // CLSID) + the root CLSID - excluding the two signature streams themselves.
+  // Returns null when the digest can't be reproduced (e.g. the prehash in
+  // MsiDigitalSignatureEx was made with a different hash algorithm).
+  async function computeMsiDigest(cfb, algoName) {
+    const chunks = [];
+    const exEntry = cfb.findRootStream(MSI_SIGNATURE_EX_STREAM);
+    if (exEntry) {
+      const ex = cfb.readStream(exEntry);
+      if (ex.length !== DIGEST_BYTE_LENGTHS[algoName]) return null;
+      chunks.push(ex);
+    }
+    const walk = (storage) => {
+      for (const child of cfb.children(storage).sort(compareNameBytes)) {
+        if (child.type === 2) {
+          if (child.name === MSI_SIGNATURE_STREAM || child.name === MSI_SIGNATURE_EX_STREAM) continue;
+          chunks.push(cfb.readStream(child));
+        } else if (child.type === 1) {
+          walk(child);
+          chunks.push(child.clsid);
+        }
+      }
+    };
+    walk(cfb.root);
+    chunks.push(cfb.root.clsid);
+    const digest = await crypto.subtle.digest(algoName, concatBytes(chunks));
+    return bytesToHex(new Uint8Array(digest));
+  }
+
   // ===================== Top-level entry point =====================
 
   // Builds one report.signatures[] entry for a single SignerInfo. Split out
@@ -624,7 +833,11 @@
   // standard `signtool sign /as` behavior, and the common case) or,
   // less commonly, as a second SignerInfo inside one blob's SignedData -
   // both need identical per-signature handling.
-  async function buildSignatureEntry(signerInfo, pkcs7, bytes, peMeta) {
+  // computeDigest(algoName) recomputes the file digest for whichever format
+  // this is (PE page-hash or MSI stream-walk) - or resolves null when it
+  // can't be reproduced, which shows up as "could not verify" rather than
+  // ever being reported as tampering.
+  async function buildSignatureEntry(signerInfo, pkcs7, computeDigest) {
     const leaf = signerInfo ? signerInfo.cert : null;
 
     let timestamp = null;
@@ -639,8 +852,14 @@
     let computedDigest = null;
     let digestMatch = null;
     if (pkcs7.fileDigestAlgorithm && WEBCRYPTO_HASH_NAMES.has(pkcs7.fileDigestAlgorithm)) {
-      computedDigest = await computeAuthenticodeDigest(bytes, peMeta, pkcs7.fileDigestAlgorithm);
-      digestMatch = !!pkcs7.fileDigestHex && computedDigest.toLowerCase() === pkcs7.fileDigestHex.toLowerCase();
+      try {
+        computedDigest = await computeDigest(pkcs7.fileDigestAlgorithm);
+      } catch (e) {
+        computedDigest = null;
+      }
+      if (computedDigest) {
+        digestMatch = !!pkcs7.fileDigestHex && computedDigest.toLowerCase() === pkcs7.fileDigestHex.toLowerCase();
+      }
     }
 
     const trustedTime = (timestamp && timestamp.time) || (signerInfo && signerInfo.signingTime) || null;
@@ -671,20 +890,20 @@
   // that's rendered as its own full signature too, not silently dropped.
   const NESTED_SIGNATURE_OID = '1.3.6.1.4.1.311.2.4.1';
 
-  async function collectSignatures(pkcs7, bytes, peMeta, results) {
+  async function collectSignatures(pkcs7, computeDigest, results) {
     // Normally exactly one SignerInfo per blob - but handle the rare
     // multi-SignerInfo-in-one-blob encoding too, so a dual SHA-1/SHA-256
     // signature is never silently dropped no matter how it's encoded.
     const signerInfos = pkcs7.signerInfos.length ? pkcs7.signerInfos : [null];
     for (const signerInfo of signerInfos) {
-      results.push(await buildSignatureEntry(signerInfo, pkcs7, bytes, peMeta));
+      results.push(await buildSignatureEntry(signerInfo, pkcs7, computeDigest));
 
       const nested = signerInfo && signerInfo.unauthAttrs && signerInfo.unauthAttrs[NESTED_SIGNATURE_OID];
       if (nested) {
         for (const nestedAttrValue of nested) {
           try {
             const nestedPkcs7 = await parsePkcs7(nestedAttrValue.raw);
-            await collectSignatures(nestedPkcs7, bytes, peMeta, results);
+            await collectSignatures(nestedPkcs7, computeDigest, results);
           } catch (e) {
             results.push({ error: 'Failed to parse nested signature: ' + e.message });
           }
@@ -698,10 +917,14 @@
     const bytes = new Uint8Array(buf);
     const fileSha256 = bytesToHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 
+    // fileType is 'PE' or 'MSI' once the file is recognized; architecture
+    // doubles as the "Format" line shown in the report header.
     const report = {
       fileName: file.name, fileSize: bytes.length, fileSha256,
-      isPE: false, architecture: null, signed: false, signatures: [], error: null,
+      fileType: null, architecture: null, signed: false, signatures: [], error: null,
     };
+
+    if (isCompoundFile(bytes)) return analyzeMsi(bytes, report);
 
     let peMeta;
     try {
@@ -710,12 +933,13 @@
       report.error = e.message;
       return report;
     }
-    report.isPE = true;
+    report.fileType = 'PE';
     report.architecture = peMeta.pe32 ? 'PE32 (32-bit)' : 'PE32+ (64-bit)';
 
     if (!peMeta.blobs.length) return report;
     report.signed = true;
 
+    const computeDigest = (algoName) => computeAuthenticodeDigest(bytes, peMeta, algoName);
     for (const blob of peMeta.blobs) {
       try {
         if (blob.certType !== 0x0002) {
@@ -724,12 +948,40 @@
         }
 
         const pkcs7 = await parsePkcs7(blob.der);
-        await collectSignatures(pkcs7, bytes, peMeta, report.signatures);
+        await collectSignatures(pkcs7, computeDigest, report.signatures);
       } catch (e) {
         report.signatures.push({ error: 'Failed to parse this signature: ' + e.message });
       }
     }
 
+    return report;
+  }
+
+  async function analyzeMsi(bytes, report) {
+    let cfb;
+    let sigEntry;
+    try {
+      cfb = parseCompoundFile(bytes);
+      sigEntry = cfb.findRootStream(MSI_SIGNATURE_STREAM);
+    } catch (e) {
+      report.error = 'Could not read this file as a Windows Installer package: ' + e.message;
+      return report;
+    }
+    report.fileType = 'MSI';
+    report.architecture = describeCompoundFile(cfb.root);
+
+    if (!sigEntry) return report;
+    report.signed = true;
+
+    // Digests are cached per algorithm - a dual-signed package asks for the same one twice.
+    const cache = {};
+    const computeDigest = (algoName) => (cache[algoName] = cache[algoName] || computeMsiDigest(cfb, algoName));
+    try {
+      const pkcs7 = await parsePkcs7(cfb.readStream(sigEntry));
+      await collectSignatures(pkcs7, computeDigest, report.signatures);
+    } catch (e) {
+      report.signatures.push({ error: 'Failed to parse this signature: ' + e.message });
+    }
     return report;
   }
 
@@ -934,6 +1186,74 @@
   // Short, scannable "Cert Information" block: who signed it, how long it's
   // valid, which CA issued it, and whether/when it was countersigned -
   // everything else lives in the collapsible "Full details" below.
+  // Plain-text summaries behind the two one-click copy buttons. A cert or
+  // TSA name can be missing its CN (subject made of O/OU only), so fall back
+  // to the full DN rather than printing nothing.
+  function nameOf(dn) {
+    return dn ? dn.cn || dn.string || 'Unknown' : 'Unknown';
+  }
+
+  function certSummaryText(sig) {
+    const leaf = sig.leaf;
+    return [
+      `Signer: ${leaf ? nameOf(leaf.subject) : 'Unknown'}`,
+      `Issuer (CA): ${leaf ? nameOf(leaf.issuer) : 'Unknown'}`,
+      `Valid to: ${(leaf && fmtDateShort(leaf.notAfter)) || 'Unknown'}`,
+    ].join('\n');
+  }
+
+  function timestampSummaryText(ts) {
+    const tsa = ts.signerCert;
+    return [
+      `Timestamped at: ${fmtDate(ts.time) || 'Unknown'}`,
+      `Timestamp authority: ${tsa ? nameOf(tsa.subject) : 'Unknown'}`,
+      `Issuer (CA): ${tsa ? nameOf(tsa.issuer) : 'Unknown'}`,
+      `Valid to: ${(tsa && fmtDateShort(tsa.notAfter)) || 'Unknown'}`,
+    ].join('\n');
+  }
+
+  // Clicks are handled by the delegated [data-copy] listener in index.html.
+  // Newlines are entity-encoded so the multi-line text survives the attribute.
+  function copySummaryButton(text, label) {
+    return `<button type="button" data-copy="${escapeHtml(text).replace(/\n/g, '&#10;')}" title="${escapeHtml(label)}" class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium bg-white dark:bg-gray-800 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-700 rounded-md hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors">📋 ${escapeHtml(label)}</button>`;
+  }
+
+  // Same look as the Cert Information card, for the timestamp: when it was
+  // countersigned, by which timestamp authority, and that authority's own CA
+  // and expiry. The full TSA certificate is still under "More details".
+  function timestampCard(sig) {
+    const ts = sig.timestamp;
+    const shell = (badgeHtml, body, copyHtml) => `
+      <div class="bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 rounded-md p-3 space-y-1">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <p class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">Timestamp Information</p>
+          <div class="flex items-center gap-2 flex-wrap">${badgeHtml}${copyHtml || ''}</div>
+        </div>
+        ${body}
+      </div>`;
+    const line = (label, value) => `<p class="text-sm text-gray-900 dark:text-gray-100"><strong>${label}:</strong> ${escapeHtml(value)}</p>`;
+
+    if (ts && ts.time) {
+      const tsa = ts.signerCert;
+      const status = sig.withinValidity === false
+        ? badge('⚠️ Outside cert validity', 'red')
+        : badge('✔️ Timestamped', 'green');
+      const type = ts.type === 'rfc3161' ? 'RFC 3161' : 'legacy Authenticode';
+      return shell(status, [
+        line('Timestamped at', fmtDate(ts.time)),
+        line('Authority (TSA)', tsa ? nameOf(tsa.subject) : 'Unknown'),
+        line('CA', tsa ? nameOf(tsa.issuer) : 'Unknown'),
+        line('Valid to', (tsa && fmtDateShort(tsa.notAfter)) || 'Unknown'),
+        line('Type', type),
+      ].join(''), copySummaryButton(timestampSummaryText(ts), 'Copy timestamp summary'));
+    }
+    if (ts && ts.error) {
+      return shell(badge('⚠️ Unreadable', 'yellow'), line('Problem', ts.error));
+    }
+    return shell(badge('⚠️ None', 'yellow'),
+      '<p class="text-sm text-gray-900 dark:text-gray-100">No trusted timestamp - this signature can’t be trusted once the signing certificate expires.</p>');
+  }
+
   function conciseCard(sig, badMatch) {
     const leaf = sig.leaf;
     const now = new Date();
@@ -949,10 +1269,6 @@
       ? `${fmtDateShort(leaf.notBefore)} – ${fmtDateShort(leaf.notAfter)}`
       : 'Unknown';
 
-    const tsLabel = sig.timestamp && sig.timestamp.time
-      ? `${sig.timestamp.signerCert ? sig.timestamp.signerCert.subject.cn + ', ' : ''}${fmtDateShort(sig.timestamp.time)}`
-      : 'None (signature can’t be trusted once the cert above expires)';
-
     const integrityLabel = sig.digestMatch === true ? '✅ Matches file'
       : sig.digestMatch === false ? '❌ MISMATCH - file changed since signing'
         : '⚠️ Unverified';
@@ -961,13 +1277,12 @@
       <div class="bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 rounded-md p-3 space-y-1">
         <div class="flex items-center justify-between gap-2 flex-wrap">
           <p class="text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">Cert Information</p>
-          ${signerBadge}
+          <div class="flex items-center gap-2 flex-wrap">${signerBadge}${copySummaryButton(certSummaryText(sig), 'Copy certificate summary')}</div>
         </div>
-        <p class="text-sm text-gray-900 dark:text-gray-100"><strong>Signer:</strong> ${escapeHtml(leaf ? leaf.subject.cn : 'Unknown')}</p>
+        <p class="text-sm text-gray-900 dark:text-gray-100"><strong>Signer:</strong> ${escapeHtml(leaf ? nameOf(leaf.subject) : 'Unknown')}</p>
         <p class="text-sm text-gray-900 dark:text-gray-100"><strong>Valid:</strong> ${escapeHtml(validStr)}</p>
-        <p class="text-sm text-gray-900 dark:text-gray-100"><strong>CA:</strong> ${escapeHtml(leaf ? leaf.issuer.cn : 'Unknown')}</p>
-        <p class="text-sm text-gray-900 dark:text-gray-100 pt-1 mt-1 border-t border-indigo-200 dark:border-indigo-800"><strong>Countersign:</strong> ${escapeHtml(tsLabel)}</p>
-        <p class="text-sm text-gray-900 dark:text-gray-100"><strong>Integrity:</strong> ${integrityLabel}</p>
+        <p class="text-sm text-gray-900 dark:text-gray-100"><strong>CA:</strong> ${escapeHtml(leaf ? nameOf(leaf.issuer) : 'Unknown')}</p>
+        <p class="text-sm text-gray-900 dark:text-gray-100 pt-1 mt-1 border-t border-indigo-200 dark:border-indigo-800"><strong>Integrity:</strong> ${integrityLabel}</p>
       </div>`;
   }
 
@@ -1032,6 +1347,7 @@
         </div>
         <div class="p-4 space-y-4">
           ${conciseCard(sig, badMatch)}
+          ${timestampCard(sig)}
           ${knownBadBanner(badMatch)}
           <details class="group" open>
             <summary class="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-300 select-none">More details ▾</summary>
@@ -1071,7 +1387,7 @@
         <div class="flex items-center justify-between flex-wrap gap-2">
           <span class="text-sm font-semibold text-gray-900 dark:text-gray-100">📄 ${escapeHtml(report.fileName)}</span>
           <div class="flex items-center gap-2">
-            ${report.signed ? badge('✔️ Signed', 'green') : badge(report.isPE ? '⚠️ Not signed' : '❌ Not a PE file', report.isPE ? 'yellow' : 'gray')}
+            ${report.signed ? badge('✔️ Signed', 'green') : badge(report.fileType ? '⚠️ Not signed' : '❌ Unsupported file', report.fileType ? 'yellow' : 'gray')}
             ${hasParsedCerts ? csvExportButton(report) : ''}
           </div>
         </div>
@@ -1086,7 +1402,9 @@
     }
 
     if (!report.signed) {
-      parts.push(`<div class="text-sm text-gray-600 dark:text-gray-400">This file has no embedded Authenticode signature. (Some Windows system files are "catalog-signed" instead — signed via a separate .cat file rather than embedded in the binary — and will also show as unsigned here.)</div>`);
+      parts.push(report.fileType === 'MSI'
+        ? `<div class="text-sm text-gray-600 dark:text-gray-400">This installer has no embedded digital signature.</div>`
+        : `<div class="text-sm text-gray-600 dark:text-gray-400">This file has no embedded Authenticode signature. (Some Windows system files are "catalog-signed" instead — signed via a separate .cat file rather than embedded in the binary — and will also show as unsigned here.)</div>`);
       return parts.join('');
     }
 

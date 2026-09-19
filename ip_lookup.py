@@ -2,14 +2,15 @@
 """
 IP address lookup - mirrors hash_lookup.py/url_lookup.py's provider/plugin
 pattern (BaseAPI, one class per provider, fanned out concurrently) but for
-raw IP addresses instead of file hashes or URLs. Deliberately small: only 4
-providers, no bespoke per-provider Jinja cards needed (the generic
+raw IP addresses instead of file hashes or URLs. Deliberately small: a
+handful of providers, no bespoke per-provider Jinja cards needed (the generic
 label/color/link card loop in _results.html covers all of them), unlike the
 much larger hash/url provider surface.
 """
 
 import asyncio
 import ipaddress
+import os
 from typing import Any, Callable, Dict, Optional
 
 import aiohttp
@@ -140,6 +141,15 @@ class IPWhoisAPI:
             result['network_name'] = data['name']
         if data.get('startAddress') and data.get('endAddress'):
             result['range'] = f"{data['startAddress']} - {data['endAddress']}"
+            # A registry allocation is usually not a single CIDR block, so
+            # summarize the start-end range into however many it takes - the
+            # results card links each one to the Tools tab's subnet calculator.
+            try:
+                blocks = ipaddress.summarize_address_range(
+                    ipaddress.ip_address(data['startAddress']), ipaddress.ip_address(data['endAddress']))
+                result['cidrs'] = [str(b) for b in blocks][:6]
+            except ValueError:
+                pass
         if data.get('type'):
             result['allocation_type'] = data['type']
         if data.get('country'):
@@ -204,6 +214,125 @@ class GeolocationAPI:
         return result
 
 
+class ShodanInternetDBAPI:
+    """Free, keyless Shodan InternetDB (internetdb.shodan.io) - a passive,
+    regularly-refreshed snapshot of what Shodan has seen on an IP: open ports,
+    reverse-DNS hostnames, detected software (CPEs), tags, and known CVEs.
+    Not a live scan, so an empty result means "Shodan hasn't seen anything",
+    not "nothing is open"."""
+
+    BASE_URL = 'https://internetdb.shodan.io/'
+
+    def __init__(self):
+        self.session = None
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if not self.session:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=12),
+                connector=aiohttp.TCPConnector(ssl=_new_ssl_context()),
+            )
+        return self.session
+
+    async def close_session(self):
+        if self.session:
+            await self.session.close()
+
+    async def query(self, ip: str) -> Dict[str, Any]:
+        session = await self._get_session()
+        try:
+            async with session.get(f"{self.BASE_URL}{ip}") as response:
+                if response.status == 404:
+                    return {'not_found': True,
+                            'context': 'Shodan InternetDB has no data for this IP '
+                                       '(nothing observed, or a private/reserved address)'}
+                if response.status == 429:
+                    return {'error': 'Shodan InternetDB rate limit reached - try again shortly'}
+                if response.status != 200:
+                    return {'error': f'Shodan InternetDB returned HTTP {response.status}'}
+                data = await response.json()
+        except Exception as e:
+            return {'error': f'Shodan InternetDB lookup failed: {_exc_text(e)}'}
+
+        return {
+            'ports': sorted(data.get('ports') or []),
+            'hostnames': data.get('hostnames') or [],
+            'tags': data.get('tags') or [],
+            'vulns': sorted(data.get('vulns') or []),
+            'cpes': data.get('cpes') or [],
+            'report_link': f"https://www.shodan.io/host/{ip}",
+        }
+
+
+class GreyNoiseAPI:
+    """GreyNoise Community API - answers "is this IP just internet background
+    noise?": mass scanners/crawlers ('noise', with a benign/malicious
+    classification) and well-known business services ('riot': Google DNS,
+    Microsoft, CDNs...). Works with no key at all but only ~10 lookups/day;
+    an optional free GREYNOISE_API_KEY (business-email signup) raises that."""
+
+    BASE_URL = 'https://api.greynoise.io/v3/community/'
+
+    def __init__(self):
+        self.session = None
+        self.api_key = (os.getenv('GREYNOISE_API_KEY') or '').strip()
+
+    def is_configured(self) -> bool:
+        return True  # keyless works - the key only raises the rate limit
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if not self.session:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=12),
+                connector=aiohttp.TCPConnector(ssl=_new_ssl_context()),
+            )
+        return self.session
+
+    async def close_session(self):
+        if self.session:
+            await self.session.close()
+
+    async def query(self, ip: str) -> Dict[str, Any]:
+        # GreyNoise only tracks internet-facing addresses and answers HTTP 400
+        # for private/reserved ones - say so instead of showing a red error.
+        if not ipaddress.ip_address(ip).is_global:
+            return {'not_found': True, 'context': 'GreyNoise only covers public internet IPs (this is a private/reserved address)'}
+        session = await self._get_session()
+        headers = {'Accept': 'application/json'}
+        if self.api_key:
+            headers['key'] = self.api_key
+        try:
+            async with session.get(f"{self.BASE_URL}{ip}", headers=headers) as response:
+                if response.status == 404:
+                    # Not an error - GreyNoise's normal "never seen this IP
+                    # scanning the internet" answer.
+                    return {'not_found': True,
+                            'context': 'Not seen scanning the internet by GreyNoise, so this is not mass-scanner '
+                                       'noise. If it is hitting you, it may be targeted.'}
+                if response.status == 401:
+                    return {'error': 'GreyNoise rejected GREYNOISE_API_KEY - check it in Settings'}
+                if response.status == 429:
+                    if self.api_key:
+                        return {'error': 'GreyNoise rate limit reached (50 lookups/week on a free key)'}
+                    return {'error': 'GreyNoise rate limit reached (~10 lookups/day without a key). '
+                                     'Add a free GREYNOISE_API_KEY in Settings to raise it.'}
+                if response.status != 200:
+                    return {'error': f'GreyNoise returned HTTP {response.status}'}
+                data = await response.json()
+        except Exception as e:
+            return {'error': f'GreyNoise lookup failed: {_exc_text(e)}'}
+
+        result: Dict[str, Any] = {'noise': bool(data.get('noise')), 'riot': bool(data.get('riot'))}
+        for field in ('classification', 'name', 'last_seen'):
+            if data.get(field):
+                result[field] = data[field]
+        result['report_link'] = data.get('link') or f"https://viz.greynoise.io/ip/{ip}"
+        return result
+
+
 def _log_line(key: str, result: Any) -> str:
     """Plain-text Terminal-tab line for one provider's IP-lookup result - a
     generic key:value dump rather than hash_lookup.py's build_log_text
@@ -225,6 +354,8 @@ def _log_line(key: str, result: Any) -> str:
     for field, value in result.items():
         if field == 'report_link' or value in (None, '', []):
             continue
+        if isinstance(value, list):
+            value = ', '.join(str(v) for v in value)
         lines.append(f"{field.replace('_', ' ').title()}: {value}")
     if result.get('report_link'):
         lines.append(f"Report: {result['report_link']}")
@@ -250,6 +381,8 @@ class IPLookupTool:
             'abuseipdb': self.abuseipdb_api,
             'ip_whois': IPWhoisAPI(),
             'geolocation': GeolocationAPI(),
+            'shodan_internetdb': ShodanInternetDBAPI(),
+            'greynoise': GreyNoiseAPI(),
         }
 
     async def lookup_ip(self, ip: str,
@@ -272,14 +405,16 @@ class IPLookupTool:
                 self.log_sink(key, key.replace('_', ' ').title(), _log_line(key, result))
 
         # Each provider class exposes its query under a different method
-        # name (established by its own class's conventions) - just 4 of
-        # them, so a small explicit mapping is clearer than forcing a
+        # name (established by its own class's conventions) - only a
+        # handful of them, so a small explicit mapping is clearer than forcing a
         # uniform interface onto classes with existing call sites elsewhere.
         provider_calls = {
             'virustotal': lambda: self.apis['virustotal'].query_ip(ip),
             'abuseipdb': lambda: self.abuseipdb_api.check_ip(ip),
             'ip_whois': lambda: self.apis['ip_whois'].query(ip),
             'geolocation': lambda: self.apis['geolocation'].query(ip),
+            'shodan_internetdb': lambda: self.apis['shodan_internetdb'].query(ip),
+            'greynoise': lambda: self.apis['greynoise'].query(ip),
         }
 
         gather_targets = []

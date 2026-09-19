@@ -20,7 +20,7 @@ from dotenv import dotenv_values
 # Hybrid Analysis, Triage) use the same key to unlock both a hash-scanning
 # and a URL-scanning provider class, so they appear in both groups.
 KNOWN_KEYS = [
-    ("VT_API_KEY", "virustotal", "VirusTotal", ("hash", "url")),
+    ("VT_API_KEY", "virustotal", "VirusTotal", ("hash", "url", "ip")),
     ("METADEFENDER_API_KEY", "metadefender", "MetaDefender", ("hash", "url")),
     ("OTX_API_KEY", "otx", "OTX AlienVault", ("hash", "url")),
     ("MB_API_KEY", "malwarebazaar", "MalwareBazaar / URLhaus", ("hash", "url")),
@@ -38,7 +38,10 @@ KNOWN_KEYS = [
     ("IPQS_API_KEY", "ipqualityscore", "IPQualityScore", ("url",)),
     ("URLSCAN_API_KEY", "urlscan", "urlscan.io", ("url",)),
     ("CHECKPHISH_API_KEY", "checkphish", "CheckPhish", ("url",)),
-    ("ABUSEIPDB_API_KEY", "hosting_reputation", "AbuseIPDB (hosting reputation)", ("url",)),
+    ("ABUSEIPDB_API_KEY", "hosting_reputation", "AbuseIPDB (hosting reputation / IP reputation)", ("url", "ip")),
+    # Optional - GreyNoise's community endpoint works keyless (~10 lookups/day);
+    # a free key raises that. Shodan InternetDB needs no key at all.
+    ("GREYNOISE_API_KEY", "greynoise", "GreyNoise (optional - raises the keyless daily limit)", ("ip",)),
 ]
 
 _KEY_NAMES = [env_var for env_var, _, _, _ in KNOWN_KEYS]
@@ -84,6 +87,12 @@ CHECKPHISH_API_KEY=
 
 # AbuseIPDB API Key (hosting IP reputation) - https://www.abuseipdb.com/register
 ABUSEIPDB_API_KEY=
+
+# --- IP lookup ---
+
+# GreyNoise API Key (OPTIONAL - the community endpoint works without one,
+# limited to ~10 lookups/day; a free key needs a business-email signup) - https://viz.greynoise.io/
+GREYNOISE_API_KEY=
 """
 
 _KEY_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=")

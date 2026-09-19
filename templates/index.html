@@ -210,6 +210,13 @@
               Bulk Analysis
             </button>
             <button
+              onclick="switchTab('tools')"
+              class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+              data-tab="tools"
+            >
+              Tools
+            </button>
+            <button
               onclick="switchTab('sandbox')"
               class="tab-btn py-4 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
               data-tab="sandbox"
@@ -251,7 +258,7 @@
                 for="file_hash"
                 class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Enter Hash (MD5, SHA1, SHA256), URL, or IP Address:
+                Enter Hash (MD5, SHA1, SHA256), URL, or IP Address (defanged like hxxp://evil[.]com is fine; a CIDR like 10.0.0.0/24 opens the subnet calculator):
               </label>
               <div class="relative">
                 <input
@@ -371,7 +378,7 @@
               type="submit"
               class="w-full bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-all duration-150 ease-in-out transform hover:scale-105 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
             >
-              🔍 Lookup Hash/URL
+              🔍 Lookup Hash/URL/IP
             </button>
             <p id="single-lookup-wait-notice" class="hidden text-xs text-center text-gray-500 dark:text-gray-400">
               Taking you to the results page - fast providers will appear within a few seconds, slower ones
@@ -379,9 +386,9 @@
             </p>
           </form>
 
-          <!-- File upload -> local SHA-256 hash -> lookup. The file itself is
-               never sent anywhere; only the computed hash is submitted via the
-               form above. This control is intentionally NOT inside the form. -->
+          <!-- File -> SHA-256 hash -> lookup. Only the computed hash is
+               submitted via the form above. This control is intentionally
+               NOT inside the form. -->
           <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
             <div class="flex items-center gap-3 mb-2">
               <div class="flex-1 border-t border-gray-200 dark:border-gray-700"></div>
@@ -392,7 +399,7 @@
               for="single-file-input"
               class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
             >
-              Upload a file (hashed locally, file contents are never uploaded):
+              Or choose a file to look up by its hash:
             </label>
             <div
               id="single-file-dropzone"
@@ -415,10 +422,10 @@
         <!-- Digital Certificate Tab -->
         <div id="digicert-tab" class="tab-content p-6 hidden">
           <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
-            Inspect the Authenticode digital signature embedded in a Windows executable (.exe, .dll, .sys, .msi, ...).
-            The file is parsed entirely in your browser and is <strong>never uploaded</strong> — only the signature
-            metadata shown below ever leaves the file. Use this to see who signed a binary, which CA issued the
-            certificate, whether it's still valid, and whether the file has been tampered with since it was signed.
+            Inspect the digital signature embedded in a Windows executable (.exe, .dll, .sys, ...) or installer (.msi).
+            Use this to see who signed it, which CA issued the certificate, whether the certificate is still valid,
+            when it was timestamped, and whether the file has been tampered with since it was signed. Each result has
+            one-click buttons to copy a short certificate summary and timestamp summary.
           </p>
 
           <div class="flex items-center justify-center w-full mb-4">
@@ -577,6 +584,99 @@
           <div id="sandbox-upload-status" class="mt-6 space-y-3 hidden"></div>
         </div>
 
+        <!-- Tools Tab: offline subnet calculator + IOC extractor. Both run
+             (no API keys needed). -->
+        <div id="tools-tab" class="tab-content p-6 hidden">
+          <div class="border-b border-gray-200 dark:border-gray-700 mb-4">
+            <nav class="-mb-px flex space-x-6">
+              <button
+                type="button"
+                onclick="switchToolsGroup('subnet')"
+                class="tools-group-btn py-2 px-1 border-b-2 font-medium text-sm transition-colors border-purple-500 text-purple-600"
+                data-group="subnet"
+              >
+                🧮 Subnet / CIDR Calculator
+              </button>
+              <button
+                type="button"
+                onclick="switchToolsGroup('ioc')"
+                class="tools-group-btn py-2 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                data-group="ioc"
+              >
+                🧲 IOC Extractor / Defang
+              </button>
+            </nav>
+          </div>
+
+          <!-- Subnet / CIDR calculator -->
+          <div id="tools-subnet" class="space-y-6">
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Works offline. Enter a CIDR block (<code class="px-1 bg-gray-100 dark:bg-gray-700 rounded text-xs">192.168.1.0/24</code>),
+              an address with a mask (<code class="px-1 bg-gray-100 dark:bg-gray-700 rounded text-xs">10.0.0.0 255.255.255.0</code>),
+              a single IP, or IPv6. Handy for checking whether an IP from a log sits inside a firewall range.
+            </p>
+            <form onsubmit="event.preventDefault(); runSubnetCalc();" class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+              <div class="md:col-span-2">
+                <label for="subnet-input" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Network</label>
+                <input id="subnet-input" type="text" autocomplete="off" placeholder="192.168.1.0/24"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+              </div>
+              <div class="md:col-span-2">
+                <label for="subnet-contains" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Is this IP / CIDR inside it? (optional)</label>
+                <input id="subnet-contains" type="text" autocomplete="off" placeholder="192.168.1.200"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+              </div>
+              <div>
+                <label for="subnet-split" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Split into /… (optional)</label>
+                <input id="subnet-split" type="number" min="0" max="128" placeholder="26"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500" />
+              </div>
+              <button type="submit"
+                class="bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-4 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-purple-500">
+                Calculate
+              </button>
+            </form>
+            <div id="subnet-result"></div>
+
+            <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Summarize / range to CIDR</h3>
+              <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                One entry per line (or comma-separated): CIDR blocks, single IPs, or ranges like
+                <code class="px-1 bg-gray-100 dark:bg-gray-700 rounded">10.0.0.1 - 10.0.0.9</code>.
+                Merges them into the fewest CIDR blocks that cover the same addresses.
+              </p>
+              <textarea id="subnet-summary-input" rows="4" placeholder="10.0.0.0/25&#10;10.0.0.128/25&#10;192.168.1.1 - 192.168.1.4"
+                class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500"></textarea>
+              <button type="button" onclick="runSubnetSummarize()"
+                class="mt-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 py-1.5 px-4 rounded-md text-sm hover:bg-gray-200 dark:hover:bg-gray-600">
+                Summarize
+              </button>
+              <div id="subnet-summary-result" class="mt-3"></div>
+            </div>
+          </div>
+
+          <!-- IOC extractor / defang -->
+          <div id="tools-ioc" class="space-y-4 hidden">
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              Paste an email, report, log, or any text - defanged (<code class="px-1 bg-gray-100 dark:bg-gray-700 rounded text-xs">hxxps://evil[.]com</code>) or not.
+              Pulls out URLs, IPs, domains, email addresses, hashes, and CVE IDs, with a Look up button on each one.
+            </p>
+            <textarea id="ioc-input" rows="8" placeholder="Paste text here..."
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500"></textarea>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" onclick="runIocExtract('extract')"
+                class="bg-purple-600 hover:bg-purple-700 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-1.5 px-4 rounded-md text-sm">Extract IOCs</button>
+              <button type="button" onclick="runIocExtract('refang')"
+                class="bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 py-1.5 px-4 rounded-md text-sm hover:bg-gray-200 dark:hover:bg-gray-600">Refang text</button>
+              <button type="button" onclick="runIocExtract('defang')"
+                class="bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 py-1.5 px-4 rounded-md text-sm hover:bg-gray-200 dark:hover:bg-gray-600">Defang text</button>
+              <button type="button" onclick="clearIocTool()"
+                class="bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 py-1.5 px-4 rounded-md text-sm hover:bg-gray-200 dark:hover:bg-gray-600">Clear</button>
+            </div>
+            <div id="ioc-result"></div>
+          </div>
+        </div>
+
         <!-- Settings Tab (API Keys) -->
         <div id="settings-tab" class="tab-content p-6 hidden">
           <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
@@ -602,6 +702,14 @@
               >
                 URL Scanning APIs
               </button>
+              <button
+                type="button"
+                onclick="switchSettingsGroup('ip')"
+                class="settings-group-btn py-2 px-1 border-b-2 font-medium text-sm transition-colors border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                data-group="ip"
+              >
+                IP Lookup APIs
+              </button>
             </nav>
           </div>
 
@@ -610,6 +718,7 @@
                already typed - mirrors the outer tab bar's hide/show pattern. -->
           <div id="settings-keys-hash" class="space-y-4"></div>
           <div id="settings-keys-url" class="space-y-4 hidden"></div>
+          <div id="settings-keys-ip" class="space-y-4 hidden"></div>
           <button
             type="button"
             onclick="saveSettings()"
@@ -1050,10 +1159,293 @@
           updateMainInputState();
         }
 
+        // A subnet (10.0.0.0/24, 10.0.0.0 /255.255.255.0, ...) isn't something
+        // any provider can look up - route it to the offline calculator
+        // instead of failing hash validation on the server.
+        const typed = mainInput.value.trim().replace(/\[\.\]|\(\.\)|\{\.\}/g, ".");
+        if (/^(?:[0-9A-Fa-f:.]+\s*\/\s*\d{1,3}|[0-9.]+\s*\/\s*[0-9.]+)$/.test(typed)) {
+          openSubnetCalc(typed);
+          return false;
+        }
+
         btn.disabled = true;
         btn.textContent = "⏳ Scanning...";
         if (notice) notice.classList.remove("hidden");
         return true; // let the real form POST/navigation proceed
+      }
+
+      // ---- Tools tab: subnet calculator + IOC extractor ---------------------
+
+      function escHtml(value) {
+        return String(value === null || value === undefined ? "" : value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function switchToolsGroup(group) {
+        ["subnet", "ioc"].forEach((g) => {
+          document.getElementById(`tools-${g}`).classList.toggle("hidden", g !== group);
+        });
+        document.querySelectorAll(".tools-group-btn").forEach((btn) => {
+          const active = btn.dataset.group === group;
+          btn.classList.toggle("border-purple-500", active);
+          btn.classList.toggle("text-purple-600", active);
+          btn.classList.toggle("border-transparent", !active);
+          btn.classList.toggle("text-gray-500", !active);
+        });
+      }
+
+      // Jump to the calculator with a value already filled in and run it.
+      // Used by the IP WHOIS card's CIDR buttons and by the main search box.
+      function openSubnetCalc(value) {
+        switchTab("tools");
+        switchToolsGroup("subnet");
+        document.getElementById("subnet-input").value = value;
+        document.getElementById("subnet-contains").value = "";
+        document.getElementById("subnet-split").value = "";
+        runSubnetCalc();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+
+      // Run a normal Single Lookup for an indicator found by one of the tools.
+      function lookupIndicator(value) {
+        document.getElementById("file_hash").value = value;
+        document.getElementById("source_filename").value = "";
+        switchTab("single");
+        updateMainInputState();
+        document.getElementById("single-lookup-form").requestSubmit();
+      }
+
+      async function toolsFetchJson(url, options) {
+        const response = await fetch(url, options);
+        let data = null;
+        try {
+          data = await response.json();
+        } catch (err) {
+          throw new Error(`Unexpected response (HTTP ${response.status})`);
+        }
+        if (!response.ok) throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+        return data;
+      }
+
+      function toolsError(message) {
+        return `<div class="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-md px-3 py-2">${escHtml(message)}</div>`;
+      }
+
+      // A value that copies itself to the clipboard when clicked.
+      function copyable(value) {
+        return `<button type="button" onclick="copyToClipboard(this.dataset.v)" data-v="${escHtml(value)}" title="Click to copy" class="font-mono text-left break-all hover:text-purple-600 dark:hover:text-purple-400">${escHtml(value)}</button>`;
+      }
+
+      async function runSubnetCalc() {
+        const out = document.getElementById("subnet-result");
+        const cidr = document.getElementById("subnet-input").value.trim();
+        const contains = document.getElementById("subnet-contains").value.trim();
+        const split = document.getElementById("subnet-split").value.trim();
+        if (!cidr) {
+          out.innerHTML = toolsError("Enter a CIDR block, e.g. 192.168.1.0/24");
+          return;
+        }
+        const params = new URLSearchParams({ cidr });
+        if (contains) params.set("contains", contains);
+        if (split) params.set("split", split);
+        out.innerHTML = '<p class="text-sm text-gray-500 dark:text-gray-400">Calculating...</p>';
+        try {
+          renderSubnetResult(await toolsFetchJson(`/api/subnet?${params}`));
+        } catch (err) {
+          out.innerHTML = toolsError(err.message);
+        }
+      }
+
+      function renderSubnetResult(r) {
+        const rows = [["Network", r.cidr]];
+        if (r.version === 4) {
+          rows.push(["Netmask", r.netmask], ["Wildcard mask", r.wildcard], ["Broadcast", r.broadcast]);
+        } else {
+          rows.push(["Compressed", r.compressed], ["Exploded", r.exploded], ["Last address", r.last_address]);
+        }
+        rows.push(
+          ["First usable host", r.first_host],
+          ["Last usable host", r.last_host],
+          ["Usable hosts", r.usable_hosts],
+          ["Total addresses", `${r.total_addresses}${r.total_addresses_pow2 && r.total_addresses_pow2 !== "1" ? `  (${r.total_addresses_pow2})` : ""}`],
+          ["Address scope", r.scope],
+        );
+        if (r.version === 4) rows.push(["Binary netmask", r.binary_netmask]);
+        if (r.version === 6 && r.slash64_count) rows.push(["/64 networks inside", r.slash64_count]);
+        if (r.reverse_zone) rows.push(["Reverse DNS zone", r.reverse_zone]);
+
+        const scopeBadge = r.is_global
+          ? '<span class="ml-2 px-2 py-0.5 rounded-full text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200">public</span>'
+          : '<span class="ml-2 px-2 py-0.5 rounded-full text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">not public</span>';
+
+        let html = "";
+        if (r.input_address) {
+          html += `<div class="mb-3 text-sm text-yellow-800 dark:text-yellow-200 bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800 rounded-md px-3 py-2">
+            ⚠️ You entered the host address <code class="font-mono">${escHtml(r.input_address)}</code> - showing the network it belongs to.</div>`;
+        }
+        if (r.contains) {
+          const good = r.contains.relation === "inside" || r.contains.relation === "contains" || r.contains.relation === "overlaps";
+          html += `<div class="mb-3 text-sm rounded-md px-3 py-2 border ${
+            good
+              ? "text-green-800 dark:text-green-200 bg-green-50 dark:bg-green-950 border-green-200 dark:border-green-800"
+              : "text-red-800 dark:text-red-200 bg-red-50 dark:bg-red-950 border-red-200 dark:border-red-800"
+          }">${good ? "✔️" : "✖️"} ${escHtml(r.contains.text)}</div>`;
+        }
+        html += '<dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm dark:text-gray-300">';
+        rows.forEach(([label, value]) => {
+          const shown = label === "Address scope" ? `${escHtml(value)}${scopeBadge}` : copyable(value);
+          html += `<div class="flex justify-between gap-3 border-b border-gray-100 dark:border-gray-700 py-1">
+            <dt class="text-gray-500 dark:text-gray-400 flex-shrink-0">${escHtml(label)}</dt><dd class="text-right">${shown}</dd></div>`;
+        });
+        html += "</dl>";
+
+        // Tiny blocks: offer a lookup per public host (a /24 would burn API quotas).
+        if (r.hosts && r.hosts.length) {
+          html += '<div class="mt-4"><p class="text-xs text-gray-500 dark:text-gray-400 mb-1">Hosts' +
+            (r.is_global ? " - click to run an IP lookup:" : ":") + "</p><div class=\"flex flex-wrap gap-2\">";
+          r.hosts.forEach((ip) => {
+            html += r.is_global
+              ? `<button type="button" onclick="lookupIndicator(this.dataset.v)" data-v="${escHtml(ip)}" class="px-2 py-1 rounded bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 text-xs font-mono hover:bg-purple-200 dark:hover:bg-purple-800">🔍 ${escHtml(ip)}</button>`
+              : `<span class="px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 text-xs font-mono">${escHtml(ip)}</span>`;
+          });
+          html += "</div></div>";
+        }
+
+        if (r.split) {
+          const s = r.split;
+          html += `<div class="mt-4"><h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Split into ${escHtml(s.count)} × /${escHtml(s.prefix)} subnets</h4>`;
+          if (s.truncated) {
+            html += `<p class="text-xs text-gray-500 dark:text-gray-400 mb-1">Showing the first ${escHtml(s.shown)} of ${escHtml(s.count)}.</p>`;
+          }
+          html += `<div class="max-h-72 overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-md">
+            <table class="w-full text-xs dark:text-gray-300"><thead class="bg-gray-50 dark:bg-gray-700 sticky top-0"><tr>
+            <th class="text-left px-2 py-1">Subnet</th><th class="text-left px-2 py-1">First host</th><th class="text-left px-2 py-1">Last host</th><th class="text-right px-2 py-1">Usable</th></tr></thead><tbody>`;
+          s.subnets.forEach((sub) => {
+            html += `<tr class="border-t border-gray-100 dark:border-gray-700"><td class="px-2 py-1 font-mono">${copyable(sub.cidr)}</td>
+              <td class="px-2 py-1 font-mono">${escHtml(sub.first_host)}</td><td class="px-2 py-1 font-mono">${escHtml(sub.last_host)}</td>
+              <td class="px-2 py-1 text-right">${escHtml(sub.usable_hosts)}</td></tr>`;
+          });
+          html += "</tbody></table></div></div>";
+        }
+        document.getElementById("subnet-result").innerHTML = html;
+      }
+
+      async function runSubnetSummarize() {
+        const out = document.getElementById("subnet-summary-result");
+        const body = new FormData();
+        body.append("text", document.getElementById("subnet-summary-input").value);
+        try {
+          const r = await toolsFetchJson("/api/subnet/summarize", { method: "POST", body });
+          const list = r.networks.map((n) => n.cidr).join("\n");
+          let html = `<p class="text-sm dark:text-gray-300 mb-2">${escHtml(r.input_count)} entr${r.input_count === 1 ? "y" : "ies"} → <strong>${escHtml(r.networks.length)}</strong> CIDR block${r.networks.length === 1 ? "" : "s"}, ${escHtml(r.total_addresses)} addresses total.</p>`;
+          if (r.networks.length) {
+            html += `<div class="flex items-start gap-3"><pre class="flex-1 text-xs font-mono bg-gray-50 dark:bg-gray-900 dark:text-gray-200 border border-gray-200 dark:border-gray-700 rounded-md p-3 max-h-56 overflow-y-auto">${escHtml(list)}</pre>
+              <button type="button" onclick="copyToClipboard(this.dataset.v)" data-v="${escHtml(list)}" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600">📋 Copy</button></div>`;
+          }
+          if (r.invalid.length) {
+            html += '<p class="text-xs text-red-600 dark:text-red-400 mt-2">Skipped:</p><ul class="text-xs text-red-600 dark:text-red-400 list-disc ml-5">';
+            r.invalid.forEach((bad) => (html += `<li><code>${escHtml(bad.entry)}</code> - ${escHtml(bad.error)}</li>`));
+            html += "</ul>";
+          }
+          out.innerHTML = html;
+        } catch (err) {
+          out.innerHTML = toolsError(err.message);
+        }
+      }
+
+      // --- IOC extractor ---
+      const IOC_LABELS = {
+        urls: "URLs", ipv4: "IPv4 addresses", ipv6: "IPv6 addresses", domains: "Domains", emails: "Email addresses",
+        md5: "MD5 hashes", sha1: "SHA-1 hashes", sha256: "SHA-256 hashes", sha512: "SHA-512 hashes", cves: "CVE IDs",
+      };
+      let iocState = { data: null, showDefanged: false };
+
+      async function runIocExtract(mode) {
+        const out = document.getElementById("ioc-result");
+        const body = new FormData();
+        body.append("text", document.getElementById("ioc-input").value);
+        out.innerHTML = '<p class="text-sm text-gray-500 dark:text-gray-400">Working...</p>';
+        try {
+          const data = await toolsFetchJson("/api/ioc/extract", { method: "POST", body });
+          iocState.data = data;
+          if (mode === "extract") {
+            renderIocResults();
+          } else {
+            const text = mode === "refang" ? data.refanged : data.defanged;
+            out.innerHTML = `<div class="flex items-center justify-between mb-1">
+              <span class="text-sm font-medium text-gray-700 dark:text-gray-300">${mode === "refang" ? "Refanged" : "Defanged"} text</span>
+              <button type="button" onclick="copyToClipboard(document.getElementById('ioc-text-output').value)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600">📋 Copy</button></div>
+              <textarea id="ioc-text-output" readonly rows="8" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-sm font-mono"></textarea>`;
+            document.getElementById("ioc-text-output").value = text;
+          }
+        } catch (err) {
+          out.innerHTML = toolsError(err.message);
+        }
+      }
+
+      function renderIocResults() {
+        const out = document.getElementById("ioc-result");
+        const data = iocState.data;
+        if (!data) return;
+        if (!data.total) {
+          out.innerHTML = '<p class="text-sm text-gray-500 dark:text-gray-400">No indicators found in that text.</p>';
+          return;
+        }
+        const lookupable = data.iocs.urls.length + data.iocs.ipv4.length + data.iocs.ipv6.length +
+          data.iocs.md5.length + data.iocs.sha1.length + data.iocs.sha256.length;
+        let html = `<div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Found ${escHtml(data.total)} indicator${data.total === 1 ? "" : "s"}</p>
+          <div class="flex items-center gap-4">
+            <label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300 cursor-pointer">
+              <input type="checkbox" ${iocState.showDefanged ? "checked" : ""} onchange="iocState.showDefanged = this.checked; renderIocResults();" />
+              Show / copy defanged
+            </label>
+            ${lookupable ? '<button type="button" onclick="downloadIocBulkCsv()" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600" title="URLs and MD5/SHA-1/SHA-256 hashes, ready for the Bulk Analysis tab">⬇️ CSV for Bulk Analysis</button>' : ""}
+          </div></div><div class="grid grid-cols-1 lg:grid-cols-2 gap-4">`;
+
+        Object.keys(IOC_LABELS).forEach((cat) => {
+          const items = data.iocs[cat];
+          if (!items.length) return;
+          const values = items.map((i) => (iocState.showDefanged ? i.defanged : i.value)).join("\n");
+          html += `<div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+            <div class="flex items-center justify-between bg-gray-50 dark:bg-gray-700 px-3 py-2">
+              <span class="text-sm font-semibold text-gray-900 dark:text-gray-100">${escHtml(IOC_LABELS[cat])} <span class="text-gray-500 dark:text-gray-400 font-normal">(${items.length})</span></span>
+              <button type="button" onclick="copyToClipboard(this.dataset.v)" data-v="${escHtml(values)}" class="px-2 py-1 text-xs bg-white dark:bg-gray-600 text-gray-600 dark:text-gray-200 rounded hover:bg-gray-100 dark:hover:bg-gray-500">📋 Copy all</button>
+            </div><ul class="max-h-56 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700">`;
+          items.forEach((item) => {
+            const shown = iocState.showDefanged ? item.defanged : item.value;
+            // Domains are looked up as https://<domain>; SHA-512 isn't supported by the hash lookup.
+            const target = cat === "domains" ? `https://${item.value}` : item.value;
+            const canLookup = cat !== "emails" && cat !== "cves" && cat !== "sha512";
+            html += `<li class="flex items-center justify-between gap-2 px-3 py-1.5 text-xs dark:text-gray-300">
+              <span class="min-w-0">${copyable(shown)}${item.scope && item.scope !== "public" ? `<span class="ml-2 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">${escHtml(item.scope)}</span>` : ""}</span>
+              ${cat === "cves" ? `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(item.value)}" target="_blank" class="flex-shrink-0 text-purple-600 dark:text-purple-400 hover:underline">NVD ↗</a>` : ""}
+              ${canLookup && !(item.scope && item.scope !== "public") ? `<button type="button" onclick="lookupIndicator(this.dataset.v)" data-v="${escHtml(target)}" class="flex-shrink-0 px-2 py-0.5 rounded bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 hover:bg-purple-200 dark:hover:bg-purple-800">🔍 Look up${cat === "domains" ? " as URL" : ""}</button>` : ""}
+            </li>`;
+          });
+          html += "</ul></div>";
+        });
+        html += "</div>";
+        out.innerHTML = html;
+      }
+
+      function downloadIocBulkCsv() {
+        if (!iocState.data) return;
+        const iocs = iocState.data.iocs;
+        const values = [...iocs.urls, ...iocs.md5, ...iocs.sha1, ...iocs.sha256].map((i) => i.value);
+        // Quote every field - URLs can contain commas.
+        const csv = "indicator\n" + values.map((v) => `"${v.replace(/"/g, '""')}"`).join("\n") + "\n";
+        downloadCSV(csv, "iocs_for_bulk_analysis.csv");
+      }
+
+      function clearIocTool() {
+        document.getElementById("ioc-input").value = "";
+        document.getElementById("ioc-result").innerHTML = "";
+        iocState.data = null;
       }
 
       // Greys out the main input whenever Advanced Options is supplying the
@@ -1304,7 +1696,7 @@
 
       // Settings tab: load current key status
       async function loadSettings() {
-        ["hash", "url"].forEach((group) => {
+        ["hash", "url", "ip"].forEach((group) => {
           document.getElementById(`settings-keys-${group}`).innerHTML =
             '<p class="text-sm text-gray-500 dark:text-gray-400">Loading...</p>';
         });
@@ -1314,7 +1706,7 @@
           const data = await response.json();
           renderSettings(data.keys || []);
         } catch (err) {
-          ["hash", "url"].forEach((group) => {
+          ["hash", "url", "ip"].forEach((group) => {
             document.getElementById(`settings-keys-${group}`).innerHTML =
               '<p class="text-sm text-red-500">Failed to load settings</p>';
           });
@@ -1326,7 +1718,7 @@
       // in, distinguished by a "-<group>" suffix on the element id, so
       // switching sub-tabs never loses an in-progress edit (see below).
       function renderSettings(keys) {
-        ["hash", "url"].forEach((group) => {
+        ["hash", "url", "ip"].forEach((group) => {
           const container = document.getElementById(`settings-keys-${group}`);
           container.innerHTML = "";
 
@@ -1362,7 +1754,7 @@
       // bar) - re-rendering only the active group would silently drop
       // whatever the user typed into the other group before switching.
       function switchSettingsGroup(group) {
-        ["hash", "url"].forEach((g) => {
+        ["hash", "url", "ip"].forEach((g) => {
           document
             .getElementById(`settings-keys-${g}`)
             .classList.toggle("hidden", g !== group);
@@ -1383,7 +1775,7 @@
         // duplicate never overwrites a value the user did type.
         const values = new Map();
         document
-          .querySelectorAll("#settings-keys-hash input[data-env-var], #settings-keys-url input[data-env-var]")
+          .querySelectorAll("#settings-keys-hash input[data-env-var], #settings-keys-url input[data-env-var], #settings-keys-ip input[data-env-var]")
           .forEach((input) => {
             if (input.value || !values.has(input.dataset.envVar)) {
               values.set(input.dataset.envVar, input.value);
@@ -1519,7 +1911,7 @@
           try {
             const report = await window.AuthenticodeParser.analyzeFile(file);
             sessionStorage.setItem("pendingCertReport", JSON.stringify({
-              status: `Analyzed ${file.name} (${(file.size / 1024).toFixed(1)} KB) — parsed locally, nothing uploaded.`,
+              status: `Analyzed ${file.name} (${(file.size / 1024).toFixed(1)} KB).`,
               html: window.AuthenticodeParser.renderReport(report),
             }));
           } catch (certErr) {
@@ -1559,9 +1951,8 @@
         await processSingleFile(file);
       }
 
-      // Digital Certificate tab -> parse the Authenticode signature fully
-      // client-side (see /static/authenticode.js). The file is never sent
-      // to the server; only the resulting text is rendered here.
+      // Digital Certificate tab -> parse the Authenticode signature
+      // client-side (see /static/authenticode.js) and render the report here.
       async function analyzeCertificateFile(event) {
         const file = event.target.files[0];
         if (!file) return;
@@ -1573,7 +1964,7 @@
 
         try {
           const report = await window.AuthenticodeParser.analyzeFile(file);
-          statusEl.textContent = `Analyzed ${file.name} (${(file.size / 1024).toFixed(1)} KB) — parsed locally, nothing uploaded.`;
+          statusEl.textContent = `Analyzed ${file.name} (${(file.size / 1024).toFixed(1)} KB).`;
           resultsEl.innerHTML = window.AuthenticodeParser.renderReport(report);
         } catch (err) {
           console.error(err);

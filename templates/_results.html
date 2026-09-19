@@ -135,6 +135,7 @@
         'download_content': '📦 Download Content-Type', 'hosting_reputation': '🏠 Hosting Reputation',
         'cross_check': '🔁 Download Cross-Check',
         'abuseipdb': '🚫 AbuseIPDB', 'ip_whois': '🪪 IP WHOIS / Network', 'geolocation': '🌍 Geolocation / Reverse DNS',
+        'shodan_internetdb': '🔎 Shodan InternetDB', 'greynoise': '📡 GreyNoise',
       } %}
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
         {% for key in pending_providers %}
@@ -1055,13 +1056,15 @@
       {% endif %}
 
       {% if search_type == 'ip' %}
-      <!-- IP lookup cards - just 4 providers, all covered by this one
+      <!-- IP lookup cards - a handful of providers, all covered by this one
            generic label/color/link loop rather than bespoke blocks like
            the hash/url sections above. -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
         {% for key, meta in [
           ('virustotal', {'label': '🛡️ VirusTotal', 'color': 'bg-blue-600', 'link': 'https://www.virustotal.com/gui/ip-address/' ~ search_value}),
           ('abuseipdb', {'label': '🚫 AbuseIPDB', 'color': 'bg-red-700', 'link': 'https://www.abuseipdb.com/check/' ~ search_value}),
+          ('greynoise', {'label': '📡 GreyNoise', 'color': 'bg-orange-600', 'link': 'https://viz.greynoise.io/ip/' ~ search_value}),
+          ('shodan_internetdb', {'label': '🔎 Shodan InternetDB', 'color': 'bg-rose-800', 'link': 'https://www.shodan.io/host/' ~ search_value}),
           ('ip_whois', {'label': '🪪 IP WHOIS / Network', 'color': 'bg-slate-700', 'link': 'https://rdap.org/ip/' ~ search_value}),
           ('geolocation', {'label': '🌍 Geolocation / Reverse DNS', 'color': 'bg-teal-600', 'link': ''}),
         ] %}
@@ -1100,11 +1103,60 @@
               {% elif key == 'ip_whois' %}
               {% if data.network_name %}<p><strong>Network:</strong> {{ data.network_name }}</p>{% endif %}
               {% if data.range %}<p><strong>Range:</strong> {{ data.range }}</p>{% endif %}
+              {% if data.cidrs %}
+              <p>
+                <strong>CIDR:</strong>
+                {% for block in data.cidrs %}
+                <button type="button" onclick="openSubnetCalc('{{ block }}')" title="Open in the subnet calculator"
+                  class="inline-flex items-center px-2 py-0.5 mr-1 rounded bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-mono hover:bg-slate-200 dark:hover:bg-slate-600">{{ block }} 🧮</button>
+                {% endfor %}
+              </p>
+              {% endif %}
               {% if data.organization %}<p><strong>Organization:</strong> {{ data.organization }}</p>{% endif %}
               {% if data.allocation_type %}<p><strong>Allocation type:</strong> {{ data.allocation_type }}</p>{% endif %}
               {% if data.country %}<p><strong>Country:</strong> {{ data.country }}</p>{% endif %}
               {% if data.handle %}<p><strong>Handle:</strong> {{ data.handle }}</p>{% endif %}
               {% if data.context %}<p>{{ data.context }}</p>{% endif %}
+              {% elif key == 'greynoise' %}
+              {% if data.riot %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Common business service (RIOT)</span>
+              {% endif %}
+              {% if data.noise %}
+              {% if data.classification == 'malicious' %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ Malicious internet scanner</span>
+              {% elif data.classification == 'benign' %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">✔️ Benign scanner</span>
+              {% else %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200">⚠️ Internet scanner (unclassified)</span>
+              {% endif %}
+              {% endif %}
+              {% if data.name %}<p><strong>Identified as:</strong> {{ data.name }}</p>{% endif %}
+              {% if data.last_seen %}<p><strong>Last seen:</strong> {{ data.last_seen }}</p>{% endif %}
+              {% if data.noise %}<p class="text-xs text-gray-500 dark:text-gray-400">This IP is mass-scanning the internet, so traffic from it is likely opportunistic background noise rather than aimed at you.</p>{% endif %}
+              {% elif key == 'shodan_internetdb' %}
+              {% if data.vulns %}
+              <p class="text-red-600 dark:text-red-400 font-medium">⚠️ {{ data.vulns|length }} known CVE{% if data.vulns|length != 1 %}s{% endif %} on this host:</p>
+              <p>
+                {% for cve in data.vulns %}
+                <a href="https://nvd.nist.gov/vuln/detail/{{ cve }}" target="_blank" class="inline-block px-2 py-0.5 mr-1 mb-1 rounded bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 text-xs font-mono hover:underline">{{ cve }}</a>
+                {% endfor %}
+              </p>
+              {% endif %}
+              {% if data.ports %}
+              <p><strong>Open ports:</strong>
+                {% for port in data.ports %}<span class="inline-block px-2 py-0.5 mr-1 mb-1 rounded bg-gray-100 dark:bg-gray-700 text-xs font-mono">{{ port }}</span>{% endfor %}
+              </p>
+              {% else %}
+              <p class="text-gray-500 dark:text-gray-400">No open ports recorded.</p>
+              {% endif %}
+              {% if data.tags %}
+              <p><strong>Tags:</strong>
+                {% for tag in data.tags %}<span class="inline-block px-2 py-0.5 mr-1 mb-1 rounded bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 text-xs">{{ tag }}</span>{% endfor %}
+              </p>
+              {% endif %}
+              {% if data.hostnames %}<p><strong>Hostnames:</strong> {{ data.hostnames[:5]|join(', ') }}{% if data.hostnames|length > 5 %} (+{{ data.hostnames|length - 5 }} more){% endif %}</p>{% endif %}
+              {% if data.cpes %}<p><strong>Detected software:</strong> {{ data.cpes[:6]|join(', ') }}{% if data.cpes|length > 6 %} (+{{ data.cpes|length - 6 }} more){% endif %}</p>{% endif %}
+              <p class="text-xs text-gray-500 dark:text-gray-400">Passive snapshot, not a live scan - a port missing here isn't proof it's closed.</p>
               {% elif key == 'geolocation' %}
               {% if data.city or data.region %}<p><strong>Location:</strong> {{ data.city }}{% if data.city and data.region %}, {% endif %}{{ data.region }}</p>{% endif %}
               {% if data.country %}<p><strong>Country:</strong> {{ data.country }}</p>{% endif %}
