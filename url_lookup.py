@@ -744,8 +744,14 @@ class CertificateChecker:
 
         expired = now > not_after
         age_days = (now - not_before).days
+        try:
+            dns_names = cert.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+        except x509.ExtensionNotFound:
+            dns_names = []
 
         result = {
+            'dns_names': dns_names,
             'trusted': True,
             'subject_cn': _attr(cert.subject, NameOID.COMMON_NAME) or 'N/A',
             'subject_org': _attr(cert.subject, NameOID.ORGANIZATION_NAME),
@@ -831,10 +837,13 @@ class CertTransparencyAPI:
 
     async def _fetch_certspotter(self, hostname: str) -> Optional[list]:
         """Certspotter's (unexpired) issuances, or None if it's unavailable
-        right now - never raises, since crt.sh is the fallback."""
+        right now - never raises, since crt.sh is the fallback. expand=cert
+        returns each certificate itself, so the TLS card can show the real
+        cert in full when a proxy hides it (assess_tls_interception)."""
         try:
             session = await self._get_session()
-            params = {'domain': hostname, 'include_subdomains': 'false', 'expand': 'issuer'}
+            params = [('domain', hostname), ('include_subdomains', 'false'),
+                      ('expand', 'issuer'), ('expand', 'cert'), ('expand', 'dns_names')]
             async with session.get(self.CERTSPOTTER_URL, params=params) as response:
                 if response.status != 200:
                     return None
@@ -903,6 +912,8 @@ class CertTransparencyAPI:
                 current.append({
                     'cert_sha256': cert_sha256,
                     'pubkey_sha256': (e.get('pubkey_sha256') or '').upper(),
+                    'der_b64': (e.get('cert') or {}).get('data'),
+                    'dns_names': e.get('dns_names') or [],
                     'issuer_cn': _dn_common_name(issuer.get('name', '')) or issuer.get('friendly_name', ''),
                     'not_before': not_before,
                     'not_after': not_after,
@@ -976,6 +987,54 @@ def _intercept_hints_regex() -> 're.Pattern':
         return re.compile(DEFAULT_INTERCEPT_ISSUER_HINTS, re.IGNORECASE)
 
 
+def _pick_real_cert(proxy_cert: Dict[str, Any], current: list):
+    """Which of the site's current certs the proxy actually received. A
+    site often has several valid at once (github.com: ~10), but
+    inspection proxies (Prisma included) copy the origin cert's validity
+    window into the cert they mint - so matching dates identifies it.
+    Falls back to the newest cert, flagged as not exact."""
+    if not current:
+        return None, False
+    same_window = [c for c in current
+                   if c['not_before'].strftime('%Y-%m-%d') == proxy_cert.get('not_before')
+                   and c['not_after'].strftime('%Y-%m-%d') == proxy_cert.get('not_after')]
+    if same_window:
+        subject = (proxy_cert.get('subject_cn') or '').lower()
+        same_window.sort(key=lambda c: subject not in [n.lower() for n in c.get('dns_names', [])])
+        return same_window[0], True
+    return max(current, key=lambda c: c['not_before']), False
+
+
+def _describe_ct_cert(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Same fields as CertificateChecker's result, for a cert from CT logs.
+    Certspotter supplies the cert itself; crt.sh (fallback) only metadata."""
+    if entry.get('der_b64'):
+        try:
+            described = CertificateChecker._format(base64.b64decode(entry['der_b64']), None)
+            described.pop('cipher', None)
+            described['trusted'] = None  # issuance is public, but the chain wasn't checked here
+            # A precertificate's bytes differ from the final cert's; CT's hash is the canonical one.
+            described['sha256'] = entry.get('cert_sha256') or described['sha256']
+            described['link'] = entry['link']
+            return described
+        except Exception:
+            pass
+    now = datetime.now(timezone.utc)
+    age_days = (now - entry['not_before']).days
+    described = {
+        'subject_cn': None, 'issuer_cn': entry['issuer_cn'],
+        'not_before': entry['not_before'].strftime('%Y-%m-%d'),
+        'not_after': entry['not_after'].strftime('%Y-%m-%d'),
+        'age_days': age_days, 'expired': now > entry['not_after'],
+        'serial_hex': entry.get('serial'), 'dns_names': entry.get('dns_names', []),
+        'link': entry['link'],
+    }
+    if age_days < 14:
+        described['warning'] = (f'Certificate issued only {age_days} day(s) ago - '
+                                'common for freshly-stood-up phishing infrastructure')
+    return described
+
+
 def assess_tls_interception(cert: Dict[str, Any], current: Optional[list],
                             hints: 're.Pattern') -> Dict[str, Any]:
     """Compares the cert this machine was handed (CertificateChecker) with
@@ -1005,16 +1064,13 @@ def assess_tls_interception(cert: Dict[str, Any], current: Optional[list],
            or (spki_sha256 and c.get('pubkey_sha256') == spki_sha256) for c in current):
         return {'status': 'not_intercepted', 'note': 'Matches a current certificate in public CT logs'}
 
-    real = max(current, key=lambda c: c['not_before']) if current else None
-    real_fields = {
-        'real_issuer': real['issuer_cn'],
-        'real_not_after': real['not_after'].strftime('%Y-%m-%d'),
-        'crtsh_link': real['link'],
-    } if real else {}
+    real, exact = _pick_real_cert(cert, current)
+    real_fields = {'real_cert': _describe_ct_cert(real), 'real_cert_exact': exact} if real else {}
 
     if hinted or (current and issuer_cn not in {c['issuer_cn'] for c in current}):
-        return {'status': 'intercepted',
-                'note': f'Re-signed by "{issuer_cn}" - this is not the certificate the site publishes', **real_fields}
+        return {'status': 'intercepted', 'proxy_issuer': issuer_cn,
+                'note': f'"{issuer_cn}" re-signed this connection, so this machine never saw the site\'s own certificate',
+                **real_fields}
     if not current:
         return {'status': 'unknown',
                 'note': 'No currently valid certificates in public CT logs (internal or brand-new host?)'}

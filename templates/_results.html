@@ -1275,7 +1275,8 @@
               {% if composite_verdict.cert_status == 'pass' %}✔️ OK
               {% elif composite_verdict.cert_status == 'warn' %}⚠️ Warning
               {% elif composite_verdict.cert_status == 'fail' %}❌ Failed
-              {% else %}❓ Unknown{% if composite_verdict.cert_intercepted %} <span class="text-xs text-gray-400">(TLS inspected by a proxy)</span>{% endif %}{% endif %}
+              {% else %}❓ Unknown{% endif %}
+              {% if composite_verdict.cert_intercepted %}<span class="text-xs text-gray-400">({% if composite_verdict.cert_status == 'unknown' %}TLS inspected by a proxy{% else %}site's real cert from CT logs - connection inspected by a proxy{% endif %})</span>{% endif %}
             </p>
           </div>
         </div>
@@ -1296,27 +1297,50 @@
             {% else %}
             {% set icpt = cert.interception or {} %}
             {% set intercepted = icpt.status == 'intercepted' %}
+            {% set rc = icpt.real_cert if intercepted else none %}
+            {% macro cert_fields(c) %}
+              <p><strong>Subject:</strong> {{ c.subject_cn or 'N/A' }}{% if c.subject_org %} ({{ c.subject_org }}){% endif %}</p>
+              {% if c.dns_names %}<p class="break-all"><strong>Names (SAN):</strong> {{ c.dns_names[:6]|join(', ') }}{% if c.dns_names|length > 6 %} (+{{ c.dns_names|length - 6 }} more){% endif %}</p>{% endif %}
+              <p><strong>Issuer:</strong> {{ c.issuer_cn }}{% if c.issuer_org %} ({{ c.issuer_org }}){% endif %}</p>
+              <p><strong>Valid:</strong> {{ c.not_before }} &rarr; {{ c.not_after }}</p>
+              {% if c.age_days is not none %}<p><strong>Cert age:</strong> {{ c.age_days }} day(s)</p>{% endif %}
+            {% endmacro %}
             <div class="space-y-1 text-sm dark:text-gray-300">
               {% if intercepted %}
-              <div class="mb-2 p-2 rounded-md bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-300 dark:border-yellow-700">
-                <p class="text-yellow-800 dark:text-yellow-300 font-medium">🔀 Intercepted by a TLS-inspection proxy</p>
-                <p class="text-xs text-yellow-800 dark:text-yellow-300">{{ icpt.note }}. The details below are the proxy's certificate, not the site's.</p>
-                {% if icpt.real_issuer %}
-                <p class="mt-1"><strong>Real certificate (CT logs):</strong> issued by {{ icpt.real_issuer }}, valid to {{ icpt.real_not_after }}
-                  {% if icpt.crtsh_link %}&middot; <a href="{{ icpt.crtsh_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">View on crt.sh</a>{% endif %}</p>
-                {% endif %}
+              <div class="mb-2 p-2 rounded-md bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-300 dark:border-yellow-700 text-xs text-yellow-800 dark:text-yellow-300">
+                🔀 <strong>Connection inspected by a TLS proxy</strong> - {{ icpt.note }}.{% if rc %} Showing the site's own certificate from public Certificate Transparency logs instead.{% endif %}
               </div>
               {% endif %}
-              <p><strong>Subject:</strong> {{ cert.subject_cn }}{% if cert.subject_org %} ({{ cert.subject_org }}){% endif %}</p>
-              <p><strong>Issuer:</strong> {{ cert.issuer_cn }}{% if cert.issuer_org %} ({{ cert.issuer_org }}){% endif %}</p>
-              <p><strong>Valid:</strong> {{ cert.not_before }} &rarr; {{ cert.not_after }}</p>
-              {% if cert.age_days is not none %}<p><strong>Cert age:</strong> {{ cert.age_days }} day(s)</p>{% endif %}
+
+              {% if rc %}
+              <p class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                Site's certificate (CT logs)
+                {% if icpt.real_cert_exact %}<span class="ml-1 normal-case font-normal text-green-600 dark:text-green-400">✔️ the one the proxy received</span>
+                {% else %}<span class="ml-1 normal-case font-normal text-gray-400">- newest on record; couldn't tell which one the proxy received</span>{% endif %}
+              </p>
+              {{ cert_fields(rc) }}
+              {% if rc.serial_hex %}<p class="break-all"><strong>Serial:</strong> <span class="font-mono text-xs">{{ rc.serial_hex }}</span></p>{% endif %}
+              {% if rc.sha256 %}<p class="break-all"><strong>SHA-256:</strong> <span class="font-mono text-xs">{{ rc.sha256 }}</span></p>{% endif %}
+              {% if rc.expired %}<p class="text-red-600 dark:text-red-400">❌ Certificate has expired</p>
+              {% elif rc.warning %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ rc.warning }}</p>{% endif %}
+              {% if rc.link %}<p class="text-xs"><a href="{{ rc.link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">🔗 crt.sh record</a>
+                <span class="text-gray-400">- crt.sh is often overloaded (502 Bad Gateway); the details above don't depend on it</span></p>{% endif %}
+              <details class="mt-2">
+                <summary class="cursor-pointer text-xs text-gray-500 dark:text-gray-400 select-none">Certificate this machine received (re-signed by the proxy)</summary>
+                <div class="mt-1 pl-3 border-l-2 border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 space-y-1">
+                  {{ cert_fields(cert) }}
+                  {% if not cert.trusted %}<p class="text-red-600 dark:text-red-400">❌ Not trusted by the default certificate store</p>{% endif %}
+                </div>
+              </details>
+              {% else %}
+              {{ cert_fields(cert) }}
               {% if not cert.trusted %}
               <p class="text-red-600 dark:text-red-400">❌ Not trusted by the default certificate store</p>
               {% endif %}
               {# A proxy mints a fresh cert per connection, so its "issued N days ago" warning is noise. #}
               {% if cert.warning and not (intercepted and cert.trusted) %}
               <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ cert.warning }}</p>
+              {% endif %}
               {% endif %}
               {% if icpt.status == 'not_intercepted' %}
               <p class="text-green-600 dark:text-green-400">✔️ {{ icpt.note }}</p>
@@ -1353,7 +1377,8 @@
               <p><strong>Certificates on record:</strong> {{ ct.cert_count }}</p>
               {% if ct.issuers %}<p><strong>Issuers seen:</strong> {{ ct.issuers|join(', ') }}</p>{% endif %}
               {% if ct.context %}<p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ ct.context }}</p>{% endif %}
-              {% if ct.report_link %}<a href="{{ ct.report_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline text-sm">🔗 View on crt.sh</a>{% endif %}
+              {% if ct.report_link %}<a href="{{ ct.report_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline text-sm">🔗 View on crt.sh</a>
+              <span class="text-xs text-gray-400">(often overloaded - a 502 there is crt.sh being down, not this app)</span>{% endif %}
             </div>
             {% endif %}
           </div>

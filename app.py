@@ -268,13 +268,22 @@ class CompositeVerdict:
         # re-signed cert, so "trusted" says nothing about the real site.
         # An *untrusted* result still fails: inspection proxies deliberately
         # re-sign a bad origin cert with an untrusted CA to pass that on.
-        cert_intercepted = (cert.get('interception') or {}).get('status') == 'intercepted'
+        # When the exact cert the proxy received is identified in CT logs,
+        # judge that one (expiry / age) instead - it's the site's real cert.
+        interception = cert.get('interception') or {}
+        cert_intercepted = interception.get('status') == 'intercepted'
+        real_cert = interception.get('real_cert') if interception.get('real_cert_exact') else None
         if cert.get('error'):
             cert_status = 'unknown'
         elif not cert.get('trusted', True) or cert.get('expired'):
             cert_status = 'fail'
         elif cert_intercepted:
-            cert_status = 'unknown'
+            if not real_cert:
+                cert_status = 'unknown'
+            elif real_cert.get('expired'):
+                cert_status = 'fail'
+            else:
+                cert_status = 'warn' if real_cert.get('warning') else 'pass'
         elif cert.get('warning'):
             cert_status = 'warn'
         else:
