@@ -19,7 +19,7 @@ Everything runs on your own machine against your own API keys.
 | Tab | What it's for |
 |---|---|
 | **Single Lookup** | Paste a hash, URL, *or* IP address into one box — auto-detected and routed to the right engine. An **Advanced Options** panel (hash/URL only) lets you additionally give the hash of a downloaded file *and/or* the URL it came from, for download-source-validation cross-checking regardless of which one you put in the main box. Results stream in as each provider finishes rather than waiting on the slowest one. |
-| **Digital Certificate** | Choose a Windows executable (`.exe`/`.dll`/`.sys`/...) or an installer (`.msi`) to inspect its digital signature — publisher, issuing CA, validity, a **Timestamp Information** card, and tamper status. Each result has one-click **Copy certificate summary** and **Copy timestamp summary** buttons. See [Digital Certificate tab](#digital-certificate-tab-in-detail). |
+| **Digital Certificate** | Choose a Windows executable (`.exe`/`.dll`/`.sys`/...) or an installer (`.msi`) to inspect its digital signature — publisher, issuing CA, validity, a **Timestamp Information** card, and tamper status. It also compares the file's own version info with the signer (flagging renamed files), and offers an on-demand **revocation check** (OCSP/CRL). Each result has one-click **Copy certificate summary** and **Copy timestamp summary** buttons. See [Digital Certificate tab](#digital-certificate-tab-in-detail). |
 | **Tools** | Two offline utilities (no API keys needed). **Subnet / CIDR Calculator**: network, netmask, wildcard, broadcast, usable range and host count, address scope (private/public/CGNAT/...), reverse-DNS zone, split into smaller subnets, "is this IP/CIDR inside it?", and summarize/range-to-CIDR merging; IPv4 and IPv6. **IOC Extractor / Defang**: paste an email or report (defanged or not) and pull out URLs, IPs, domains, emails, hashes, and CVE IDs, with one-click lookups, refang/defang of the whole text, and a CSV export for Bulk Analysis. |
 | **Bulk Analysis** | Upload a CSV of hashes and/or URLs (column named `hash`, `url`, `indicator`, `value`, or `ioc`) for batch scanning, with a downloadable CSV of results. |
 | **Sandbox Upload** | Upload a real file to VirusTotal, MetaDefender, Hybrid Analysis, and/or Triage for full sandbox detonation, with live progress. |
@@ -46,6 +46,7 @@ Below is every card the app can show today, grouped by which kind of lookup prod
 | 🦊 **ThreatFox** | abuse.ch's indicator-of-compromise (IOC) database — checks whether this hash has been reported as part of an active malware campaign. |
 | 🔬 **Hybrid Analysis** | CrowdStrike's public sandbox database — shows whether this hash has already been detonated and analyzed, with a behavioral verdict. |
 | 🏥 **Triage Sandbox** | Hatching Triage's public sandbox database — another independent detonation-report source. Hash lookups only (see the API key table below for why URLs aren't sent to Triage). |
+| 📗 **CIRCL Known Files** | Keyless lookup in CIRCL hashlookup (NIST NSRL, Linux distro packages, snaps, ...). A hit means the exact file ships in catalogued software — file name, product, source and CIRCL's trust score — which helps rule out false positives. *Known isn't safe*: NSRL also lists hacking tools, so this card is informational and never counts toward the threat score. Brand-new builds (e.g. current Windows 11 binaries) usually aren't in it yet; "not found" is not evidence either way. |
 
 ### URL lookup cards
 
@@ -66,7 +67,7 @@ Below is every card the app can show today, grouped by which kind of lookup prod
 
 | Card | What it's for |
 |---|---|
-| 🔒 **TLS Certificate** | Connects to the site directly and inspects its HTTPS certificate: is it currently valid (not expired), is it issued by a CA your OS actually trusts, and does the chain check out. A failed or self-signed certificate is a strong red flag on its own, before any reputation engine has even weighed in. |
+| 🔒 **TLS Certificate** | Connects to the site directly and inspects its HTTPS certificate: is it currently valid (not expired), is it issued by a CA your OS actually trusts, and does the chain check out. A failed or self-signed certificate is a strong red flag on its own, before any reputation engine has even weighed in. It also detects a **TLS-inspection proxy** (Prisma Access, Zscaler, Netskope, ...): the served certificate is compared with the site's current certificates in Certificate Transparency logs (by serial, SHA-256 and public key). If the proxy re-signed it, the card shows **🔀 Intercepted** with the *real* issuer and expiry from CT logs, and the verdict banner reports the certificate as *Unknown* rather than trusting the proxy's certificate. Add your company's inspection CA name to `TLS_INTERCEPT_ISSUER_HINTS` in `config.env` if it isn't recognized. |
 | 📜 **Certificate Transparency (crt.sh)** | Every publicly-trusted TLS certificate ever issued for a domain gets logged in public, auditable Certificate Transparency logs. This card searches those logs (via SSLMate Certspotter, falling back to crt.sh) — useful for spotting a certificate issued for a domain that its legitimate owner never requested, or an unusually large/suspicious issuance history. |
 | 🪪 **WHOIS / Domain Age** | Registration date, expiration date, last-changed date, registrar, the registrar's abuse-report contact email, and nameservers — via a free RDAP lookup (WHOIS's modern, structured-data successor). A domain registered days ago is one of the strongest "this could be a disposable phishing/malware domain" signals there is. Registrant/admin contact details are almost always redacted for privacy under modern RDAP policy, so registrar + nameservers are typically the only reliably public fields. |
 | ↪️ **Redirect Chain** | Follows every redirect hop by hop (not just the final landing page) and flags it when the URL routes through a *different domain* before landing — a common trick for disguising the real destination. |
@@ -178,24 +179,28 @@ It works with no key but is limited to about 10 lookups a day. A free `GREYNOISE
 
 Choose a file on the **Digital Certificate** tab. It accepts Windows executables (`.exe`, `.dll`, `.sys`, ...) and Windows Installer packages (`.msi`). Each embedded signature gets:
 
-- **Cert Information** — signer, validity range, issuing CA, a status badge (valid / expired / known abused certificate) and an **Integrity** line. A **📋 Copy certificate summary** button copies:
+- **Cert Information** — signer, validity range, issuing CA, a status badge (valid / expired / known abused certificate) and an **Integrity** line. A **📋 Copy certificate summary** button copies the signer certificate and its timestamp together:
 
   ```
-  Signer: Microsoft Corporation
-  Issuer (CA): Microsoft Code Signing PCA 2011
-  Valid to: 26 Jul 2019
+  Certificate Information
+  Name of signer: OpenJS Foundation
+  CA: Microsoft ID Verified CS AOC CA 03
+  Valid from: 02 Aug 2026
+  Valid to: 05 Aug 2026
+
+  Timestamp Information
+  Timestamped at: Mon, 03 Aug 2026 11:18:07 UTC
+  Name of signer: Microsoft Public RSA Time Stamping Authority
+  CA: Microsoft Public RSA Timestamping CA 2020
+  Valid from: 23 Oct 2025
+  Valid to: 22 Oct 2026
   ```
 
-- **Timestamp Information** — its own card: when the signature was countersigned, which timestamp authority (TSA) did it, that authority's issuing CA, and when the TSA's own certificate expires. A **📋 Copy timestamp summary** button copies:
+- **Timestamp Information** — its own card: when the signature was countersigned, which timestamp authority (TSA) did it, that authority's issuing CA, and when the TSA's own certificate expires. A **📋 Copy timestamp summary** button copies just the *Timestamp Information* section shown above.
 
-  ```
-  Timestamped at: Wed, 24 Oct 2018 03:32:19 UTC
-  Timestamp authority: Microsoft Time-Stamp service
-  Issuer (CA): Microsoft Time-Stamp PCA
-  Valid to: 23 Nov 2019
-  ```
-
-  The two examples above are from the same file, and show why the timestamp matters: the signing certificate expired in July 2019, but the signature was timestamped in October 2018 while that certificate was still valid, so it remains trustworthy. A signature with **no** timestamp stops being trustworthy the day its certificate expires, and the card says so.
+  The example above (from `node.exe`) shows why the timestamp matters: the signing certificate was only valid for three days and expired on 5 Aug 2026, but the signature was timestamped on 3 Aug while that certificate was still valid, so it remains trustworthy. A signature with **no** timestamp stops being trustworthy the day its certificate expires, and the card says so.
+- **File Information** (`.exe`/`.dll`, signed or not) — what the file says about itself, as in Explorer's *Properties → Details*: company, product, description, original file name, version. Inside each signature's card a **Publisher** line compares that company name with the signer: *✅ Matches signer*, or *⚠️ File says "X", signed by "Y"*. A mismatch is a prompt to look, not proof — `node.exe` says "Node.js" but is signed by the OpenJS Foundation — but a file claiming to be from Microsoft and signed by someone else is a classic disguise. A **File name: ⚠️ Renamed** line appears when the file's built-in original name differs from its current one (e.g. `psexec.exe` saved as `update.exe`); a browser's `setup (1).exe` doesn't count.
+- **🛡️ Check revocation** — on both the signer and the timestamp authority. Asks the CA whether it has revoked the certificate: OCSP first, then the CRL, with the CA's signature on the answer verified. Runs only when clicked (the rest of the tab never leaves your machine). The result accounts for the timestamp the way Windows does: revoked *after* the file was timestamped for a non-security reason (e.g. *superseded*) is ⚠️ and the signature still counts; revoked for *keyCompromise*, with no reason, or before the timestamp is 🚨. For an expired certificate, CAs often stop publishing status, so "not revoked" is weaker evidence and "unknown" is common. The URLs come from the uploaded file, so the server only fetches from public internet addresses.
 - **More details** — the full signer and TSA certificates (serial, thumbprints, key algorithm, extended key usage), the issuing chain, the embedded and recomputed file digests, and the program name the signer declared. For dual SHA-1 + SHA-256 signed files, every signature is shown, with an *Embedded Signatures* summary table on top.
 - **Export CSV** — every certificate (signer, CA chain, timestamp authority) as one CSV.
 

@@ -954,6 +954,54 @@ async def _bounded(coro, timeout: float, timeout_message: str) -> Dict[str, Any]
         return {'error': timeout_message}
 
 
+class CIRCLHashlookupAPI(BaseAPI):
+    """CIRCL hashlookup - keyless lookup against known-file databases
+    (NIST NSRL, Linux distro packages, snaps, ...). A hit means the exact
+    file ships in some known software package, which helps rule out false
+    positives. "Known" is not "safe": NSRL catalogues hacking tools too,
+    so this is informational and never scored (see NON_SCORING_KEYS)."""
+
+    HASH_TYPES = {32: 'md5', 40: 'sha1', 64: 'sha256'}
+
+    def __init__(self):
+        super().__init__('CIRCL_HASHLOOKUP_UNUSED')  # no key required
+        self.base_url = 'https://hashlookup.circl.lu/lookup'
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def query_hash(self, file_hash: str) -> Dict[str, Any]:
+        hash_type = self.HASH_TYPES.get(len(file_hash))
+        if not hash_type:
+            raise Exception("Unsupported hash length for CIRCL hashlookup")
+
+        session = await self._get_session()
+        async with session.get(f"{self.base_url}/{hash_type}/{file_hash}",
+                               headers={'Accept': 'application/json'}) as response:
+            if response.status == 404:
+                return {'not_found': True,
+                        'context': 'Not in known-file databases (NSRL etc.) - not evidence either way'}
+            if response.status != 200:
+                error_text = await response.text()
+                raise Exception(f"HTTP {response.status}: {error_text[:200]}")
+            data = await response.json(content_type=None)
+
+        product = (data.get('ProductCode') or {}).get('ProductName')
+        result = {
+            'known_file': True,
+            'filename': data.get('FileName'),
+            'product': product,
+            'source': data.get('source') or data.get('db'),
+            'trust': data.get('hashlookup:trust'),
+            'parent_count': data.get('hashlookup:parent-total'),
+            'report_link': f"{self.base_url}/{hash_type}/{file_hash}",
+        }
+        if data.get('KnownMalicious'):
+            result['malicious'] = True
+            result['threat_name'] = f"Flagged known-malicious by {data['KnownMalicious']}"
+        return result
+
+
 class HashLookupTool:
     def __init__(self, log_sink=None):
         load_dotenv(config_store.get_config_path())
@@ -966,6 +1014,7 @@ class HashLookupTool:
             'threatfox': ThreatFoxAPI(),
             'hybrid_analysis': HybridAnalysisAPI(),
             'triage_sandbox': TriageSandboxAPI(),
+            'circl_hashlookup': CIRCLHashlookupAPI(),
         }
 
     async def lookup_hash(self, file_hash: str,

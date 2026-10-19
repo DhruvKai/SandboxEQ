@@ -19,6 +19,8 @@ import base64
 import hashlib
 import ipaddress
 import json
+import os
+import re
 import socket
 import ssl
 import time
@@ -27,6 +29,9 @@ from typing import Any, Callable, Dict, Optional
 from urllib.parse import quote, urljoin, urlparse
 
 import aiohttp
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.x509.oid import NameOID
 from dotenv import load_dotenv
 
 import config_store
@@ -695,7 +700,7 @@ class CertificateChecker:
             ctx = _new_ssl_context() or ssl.create_default_context()
             with socket.create_connection((hostname, port), timeout=timeout) as sock:
                 with ctx.wrap_socket(sock, server_hostname=hostname) as tls_sock:
-                    cert = tls_sock.getpeercert()
+                    der = tls_sock.getpeercert(binary_form=True)
                     cipher = tls_sock.cipher()
         except ssl.SSLCertVerificationError as e:
             # An untrusted/self-signed/hostname-mismatched cert is itself a
@@ -704,7 +709,7 @@ class CertificateChecker:
         except Exception as e:
             return {'error': f"Could not establish TLS connection: {_exc_text(e)}"}
 
-        return CertificateChecker._format(cert, cipher)
+        return CertificateChecker._format(der, cipher)
 
     @staticmethod
     def _insecure_result(hostname: str, port: int, timeout: float, verify_error: str) -> Dict[str, Any]:
@@ -712,45 +717,50 @@ class CertificateChecker:
             ctx = ssl._create_unverified_context()
             with socket.create_connection((hostname, port), timeout=timeout) as sock:
                 with ctx.wrap_socket(sock, server_hostname=hostname) as tls_sock:
-                    cert = tls_sock.getpeercert()
+                    der = tls_sock.getpeercert(binary_form=True)
                     cipher = tls_sock.cipher()
         except Exception as e:
             return {'error': f"Could not establish TLS connection: {_exc_text(e)}"}
 
-        formatted = CertificateChecker._format(cert, cipher)
+        formatted = CertificateChecker._format(der, cipher)
         formatted['trusted'] = False
         formatted['warning'] = f"Certificate not trusted: {verify_error}"
         return formatted
 
     @staticmethod
-    def _format(cert: dict, cipher) -> Dict[str, Any]:
-        def _parse(dt_str):
-            try:
-                return datetime.strptime(dt_str, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=timezone.utc)
-            except Exception:
-                return None
+    def _format(der: bytes, cipher) -> Dict[str, Any]:
+        # Parsed from the raw DER rather than getpeercert()'s dict, which is
+        # empty for an unverified connection (so an untrusted cert used to
+        # show as all "N/A") and has no fingerprint.
+        cert = x509.load_der_x509_certificate(der)
 
-        not_before = _parse(cert.get('notBefore', ''))
-        not_after = _parse(cert.get('notAfter', ''))
+        def _attr(name, oid):
+            values = name.get_attributes_for_oid(oid)
+            return values[0].value if values else None
+
+        not_before = cert.not_valid_before_utc
+        not_after = cert.not_valid_after_utc
         now = datetime.now(timezone.utc)
 
-        subject = dict(x[0] for x in cert.get('subject', []))
-        issuer = dict(x[0] for x in cert.get('issuer', []))
-
-        expired = bool(not_after and now > not_after)
-        age_days = (now - not_before).days if not_before else None
+        expired = now > not_after
+        age_days = (now - not_before).days
 
         result = {
             'trusted': True,
-            'subject_cn': subject.get('commonName', 'N/A'),
-            'subject_org': subject.get('organizationName'),
-            'issuer_cn': issuer.get('commonName', 'N/A'),
-            'issuer_org': issuer.get('organizationName'),
-            'not_before': not_before.strftime('%Y-%m-%d') if not_before else 'N/A',
-            'not_after': not_after.strftime('%Y-%m-%d') if not_after else 'N/A',
+            'subject_cn': _attr(cert.subject, NameOID.COMMON_NAME) or 'N/A',
+            'subject_org': _attr(cert.subject, NameOID.ORGANIZATION_NAME),
+            'issuer_cn': _attr(cert.issuer, NameOID.COMMON_NAME) or 'N/A',
+            'issuer_org': _attr(cert.issuer, NameOID.ORGANIZATION_NAME),
+            'not_before': not_before.strftime('%Y-%m-%d'),
+            'not_after': not_after.strftime('%Y-%m-%d'),
             'expired': expired,
             'age_days': age_days,
             'cipher': cipher[0] if cipher else None,
+            'serial_hex': format(cert.serial_number, 'X'),
+            'sha256': hashlib.sha256(der).hexdigest().upper(),
+            'spki_sha256': hashlib.sha256(cert.public_key().public_bytes(
+                Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).hexdigest().upper(),
+            'issuer_dn': cert.issuer.rfc4514_string(),
         }
         if expired:
             result['warning'] = 'Certificate has expired'
@@ -781,6 +791,7 @@ class CertTransparencyAPI:
 
     def __init__(self):
         self.session = None
+        self._certspotter_tasks: Dict[str, asyncio.Future] = {}
 
     def is_configured(self) -> bool:
         return True  # no key required, always available
@@ -796,21 +807,33 @@ class CertTransparencyAPI:
     async def close_session(self):
         if self.session:
             await self.session.close()
+            self.session = None
+        self._certspotter_tasks.clear()
 
     async def query(self, hostname: str) -> Dict[str, Any]:
         session = await self._get_session()
 
-        result = await self._query_certspotter(session, hostname)
+        result = await self._query_certspotter(hostname)
         if result is not None:
             return result
 
         return await self._query_crtsh(session, hostname)
 
-    async def _query_certspotter(self, session: aiohttp.ClientSession, hostname: str):
-        """Returns a result dict on success, or None to fall through to
-        crt.sh (rate-limited, errored, or otherwise unavailable right now -
-        never raises, since this is only the preferred path, not the only one)."""
+    def _certspotter_entries(self, hostname: str) -> 'asyncio.Future':
+        """One shared Certspotter request per hostname per lookup: query()
+        and current_certs() both need it and run concurrently, and the
+        unauthenticated limit is only 100 requests an hour."""
+        task = self._certspotter_tasks.get(hostname)
+        if task is None:
+            task = asyncio.ensure_future(self._fetch_certspotter(hostname))
+            self._certspotter_tasks[hostname] = task
+        return task
+
+    async def _fetch_certspotter(self, hostname: str) -> Optional[list]:
+        """Certspotter's (unexpired) issuances, or None if it's unavailable
+        right now - never raises, since crt.sh is the fallback."""
         try:
+            session = await self._get_session()
             params = {'domain': hostname, 'include_subdomains': 'false', 'expand': 'issuer'}
             async with session.get(self.CERTSPOTTER_URL, params=params) as response:
                 if response.status != 200:
@@ -818,8 +841,13 @@ class CertTransparencyAPI:
                 entries = await response.json()
         except Exception:
             return None
+        return entries if isinstance(entries, list) else None
 
-        if not isinstance(entries, list):
+    async def _query_certspotter(self, hostname: str):
+        """Returns a result dict on success, or None to fall through to
+        crt.sh (rate-limited, errored, or otherwise unavailable right now)."""
+        entries = await self._certspotter_entries(hostname)
+        if entries is None:
             return None
         if not entries:
             return {
@@ -854,6 +882,145 @@ class CertTransparencyAPI:
             'issuers': issuers[:5],
             'report_link': f'https://crt.sh/?q={quote(hostname)}',
         }
+
+    async def current_certs(self, hostname: str) -> Optional[list]:
+        """Certificates for `hostname` that are valid right now, per CT logs -
+        what the site *should* be serving. Used by assess_tls_interception().
+        Certspotter (only lists unexpired issuances, with cert and public-key
+        hashes) first; crt.sh (serial numbers) as the fallback - it 502s
+        under load, so it gets a retry. Returns None if neither answers."""
+        now = datetime.now(timezone.utc)
+        current = []
+
+        entries = await self._certspotter_entries(hostname)
+        if entries is not None:
+            for e in entries:
+                not_before, not_after = _parse_ct_time(e.get('not_before')), _parse_ct_time(e.get('not_after'))
+                if not (not_before and not_after and not_before <= now <= not_after):
+                    continue
+                issuer = e.get('issuer') or {}
+                cert_sha256 = (e.get('cert_sha256') or '').upper()
+                current.append({
+                    'cert_sha256': cert_sha256,
+                    'pubkey_sha256': (e.get('pubkey_sha256') or '').upper(),
+                    'issuer_cn': _dn_common_name(issuer.get('name', '')) or issuer.get('friendly_name', ''),
+                    'not_before': not_before,
+                    'not_after': not_after,
+                    'link': f'https://crt.sh/?sha256={cert_sha256}',
+                })
+            return current
+
+        session = await self._get_session()
+        params = {'q': hostname, 'output': 'json', 'exclude': 'expired', 'deduplicate': 'Y'}
+        entries = None
+        for attempt in range(2):
+            try:
+                async with session.get(self.CRTSH_URL, params=params,
+                                       timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        text = await response.text()
+                        entries = json.loads(text) if text.strip() else []
+                        break
+            except Exception:
+                pass
+            if attempt == 0:
+                await asyncio.sleep(2)
+        if not isinstance(entries, list):
+            return None
+
+        for e in entries:
+            not_before, not_after = _parse_ct_time(e.get('not_before')), _parse_ct_time(e.get('not_after'))
+            if not (not_before and not_after and not_before <= now <= not_after) or not e.get('serial_number'):
+                continue
+            current.append({
+                'serial': _normalize_serial(e['serial_number']),
+                'issuer_cn': _dn_common_name(e.get('issuer_name', '')),
+                'not_before': not_before,
+                'not_after': not_after,
+                'link': f"https://crt.sh/?id={e.get('id')}",
+            })
+        return current
+
+
+# Issuer names of common TLS-inspection products. A cert issued by one of
+# these was re-signed by a proxy between this machine and the site.
+# Overridable (e.g. to add your company's inspection CA name) via
+# TLS_INTERCEPT_ISSUER_HINTS in config.env.
+DEFAULT_INTERCEPT_ISSUER_HINTS = r'Palo Alto|Prisma|Forward.?Trust|Zscaler|Netskope|Fortinet|Fortigate'
+
+
+def _normalize_serial(serial: str) -> str:
+    return (serial or '').replace(':', '').upper().lstrip('0') or '0'
+
+
+def _parse_ct_time(value: Optional[str]) -> Optional[datetime]:
+    """Certspotter sends '...Z', crt.sh a bare '2026-09-01T00:00:00' (UTC)."""
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (AttributeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _dn_common_name(dn: str) -> str:
+    """CN out of crt.sh's 'C=US, O=Example, CN=Example CA' issuer string."""
+    match = re.search(r'(?:^|,\s*)CN=("[^"]*"|[^,]*)', dn or '')
+    return match.group(1).strip().strip('"') if match else (dn or '')
+
+
+def _intercept_hints_regex() -> 're.Pattern':
+    pattern = os.getenv('TLS_INTERCEPT_ISSUER_HINTS') or DEFAULT_INTERCEPT_ISSUER_HINTS
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        return re.compile(DEFAULT_INTERCEPT_ISSUER_HINTS, re.IGNORECASE)
+
+
+def assess_tls_interception(cert: Dict[str, Any], current: Optional[list],
+                            hints: 're.Pattern') -> Dict[str, Any]:
+    """Compares the cert this machine was handed (CertificateChecker) with
+    the certs CT logs say the site currently has (current_certs). A
+    corporate TLS-inspection proxy (Prisma Access, Zscaler, ...) re-signs
+    every site with its own CA, which the company has installed as trusted
+    - so the handshake 'passes' even though it says nothing about the real
+    site's certificate. The cert itself gives that away: the proxy's cert
+    can copy the site's name, but not its CA-assigned serial, its exact
+    bytes (SHA-256) or - since the proxy never has the site's private key -
+    its public key.
+
+    status: not_intercepted | intercepted | unclear | unknown."""
+    serial = _normalize_serial(cert.get('serial_hex', ''))
+    sha256 = (cert.get('sha256') or '').upper()
+    spki_sha256 = (cert.get('spki_sha256') or '').upper()
+    issuer_cn = cert.get('issuer_cn') or ''
+    hinted = bool(hints.search(f"{issuer_cn} {cert.get('issuer_org') or ''}"))
+
+    if current is None:
+        if hinted:
+            return {'status': 'intercepted', 'by_name_only': True,
+                    'note': 'Issuer is a known TLS-inspection product (CT logs unreachable, so not compared)'}
+        return {'status': 'unknown', 'note': 'Could not reach Certspotter or crt.sh to compare against public CT records'}
+
+    if any(c.get('serial') == serial or (sha256 and c.get('cert_sha256') == sha256)
+           or (spki_sha256 and c.get('pubkey_sha256') == spki_sha256) for c in current):
+        return {'status': 'not_intercepted', 'note': 'Matches a current certificate in public CT logs'}
+
+    real = max(current, key=lambda c: c['not_before']) if current else None
+    real_fields = {
+        'real_issuer': real['issuer_cn'],
+        'real_not_after': real['not_after'].strftime('%Y-%m-%d'),
+        'crtsh_link': real['link'],
+    } if real else {}
+
+    if hinted or (current and issuer_cn not in {c['issuer_cn'] for c in current}):
+        return {'status': 'intercepted',
+                'note': f'Re-signed by "{issuer_cn}" - this is not the certificate the site publishes', **real_fields}
+    if not current:
+        return {'status': 'unknown',
+                'note': 'No currently valid certificates in public CT logs (internal or brand-new host?)'}
+    return {'status': 'unclear',
+            'note': 'Serial not in CT logs yet, but the issuer matches the public record (possibly a just-issued certificate)',
+            **real_fields}
 
 
 class SSLLabsAPI:
@@ -1528,7 +1695,12 @@ class URLLookupTool:
             _set('url_heuristics', url_heuristics_result)
 
         loop = asyncio.get_event_loop()
+        current_certs_task = None
         if hostname:
+            # Not a card of its own - feeds the TLS-interception note added
+            # to the certificate result after the gather (see below).
+            current_certs_task = asyncio.ensure_future(
+                asyncio.wait_for(self.cert_transparency_api.current_certs(hostname), timeout=40))
             gather_targets.append(_track('certificate', _bounded(
                 loop.run_in_executor(None, CertificateChecker.check, hostname),
                 20, "Timed out establishing a TLS connection",
@@ -1580,6 +1752,16 @@ class URLLookupTool:
             )
         except asyncio.TimeoutError:
             pass
+
+        if current_certs_task is not None:
+            try:
+                current = await current_certs_task
+            except Exception:  # timeout / unexpected - treated as "crt.sh unavailable"
+                current = None
+            cert = api_results.get('certificate')
+            if isinstance(cert, dict) and not cert.get('error') and cert.get('serial_hex'):
+                _set('certificate', {**cert, 'interception': assess_tls_interception(
+                    cert, current, _intercept_hints_regex())})
 
         # Only the keyless "extra check" sessions are closed here - the
         # provider (self.apis) sessions are deliberately left open for the

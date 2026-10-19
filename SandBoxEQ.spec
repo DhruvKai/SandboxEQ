@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('templates', 'templates'), ('static', 'static'), ('assets', 'assets')]
 binaries = []
-hiddenimports = ['uvicorn', 'fastapi', 'dotenv', 'aiohttp', 'colorama', 'jinja2', 'multipart', 'config_store', 'url_lookup', 'ip_lookup', 'ioc_tools', 'subnet_tools', 'truststore', 'webview']
+hiddenimports = ['uvicorn', 'fastapi', 'dotenv', 'aiohttp', 'colorama', 'jinja2', 'multipart', 'config_store', 'url_lookup', 'ip_lookup', 'ioc_tools', 'subnet_tools', 'revocation', 'cryptography', 'truststore', 'webview']
 tmp_ret = collect_all('webview')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('clr_loader')

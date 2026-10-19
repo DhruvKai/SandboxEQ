@@ -128,7 +128,8 @@
       {% set provider_meta = {
         'virustotal': '🛡️ VirusTotal', 'metadefender': '🔰 MetaDefender', 'otx': '🌐 OTX AlienVault',
         'malwarebazaar': '🦠 MalwareBazaar', 'threatfox': '🦊 ThreatFox', 'hybrid_analysis': '🧪 Hybrid Analysis',
-        'triage_sandbox': '🧫 Triage Sandbox', 'urlhaus': '🧨 URLhaus', 'openphish': '🎣 OpenPhish',
+        'triage_sandbox': '🧫 Triage Sandbox', 'circl_hashlookup': '📗 CIRCL Known Files',
+        'urlhaus': '🧨 URLhaus', 'openphish': '🎣 OpenPhish',
         'urlscan': '🖼️ urlscan.io', 'checkphish': '🕵️ CheckPhish',
         'certificate': '🔒 TLS Certificate', 'cert_transparency': '📜 Certificate Transparency',
         'domain_age': '🪪 WHOIS / Domain Age', 'redirect_chain': '↪️ Redirect Chain', 'favicon': '🖼️ Favicon Check',
@@ -1053,6 +1054,41 @@
         </div>
         {% endif %}
       </div>
+
+      <!-- Third Row: CIRCL hashlookup (known-file databases - informational, not scored) -->
+      {% if results.circl_hashlookup %}
+      <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-6 mb-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden fade-in">
+          <div class="bg-emerald-700 text-white p-4">
+            <h3 class="text-lg font-semibold">
+              <a href="https://hashlookup.circl.lu/" target="_blank" class="hover:underline">📗 CIRCL Known Files</a>
+            </h3>
+          </div>
+          <div class="p-4 text-sm dark:text-gray-300">
+            {% set data = results.circl_hashlookup %}
+            {% if data.error %}
+            <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ data.error }}</div>
+            {% elif data.not_found %}
+            <div class="text-gray-600 dark:text-gray-400"><em>ℹ️ {{ data.context or 'Not found in database' }}</em></div>
+            {% else %}
+            <div class="space-y-1">
+              {% if data.malicious %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200">❌ {{ data.threat_name }}</span>
+              {% else %}
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">📗 Known file</span>
+              {% endif %}
+              {% if data.filename %}<p class="break-all"><strong>File name:</strong> {{ data.filename }}</p>{% endif %}
+              {% if data.product %}<p><strong>Product:</strong> {{ data.product }}</p>{% endif %}
+              {% if data.source %}<p><strong>Source:</strong> {{ data.source }}</p>{% endif %}
+              {% if data.trust is not none %}<p><strong>Trust score:</strong> {{ data.trust }}/100{% if data.parent_count %} <span class="text-xs text-gray-400">(seen in {{ data.parent_count }} package{% if data.parent_count != 1 %}s{% endif %})</span>{% endif %}</p>{% endif %}
+              <p class="text-xs text-gray-500 dark:text-gray-400">Ships in catalogued software - known isn't the same as safe (NSRL also lists hacking tools).</p>
+              {% if data.report_link %}<a href="{{ data.report_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">🔗 View record</a>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endif %}
       {% endif %}
 
       {% if search_type == 'ip' %}
@@ -1239,7 +1275,7 @@
               {% if composite_verdict.cert_status == 'pass' %}✔️ OK
               {% elif composite_verdict.cert_status == 'warn' %}⚠️ Warning
               {% elif composite_verdict.cert_status == 'fail' %}❌ Failed
-              {% else %}❓ Unknown{% endif %}
+              {% else %}❓ Unknown{% if composite_verdict.cert_intercepted %} <span class="text-xs text-gray-400">(TLS inspected by a proxy)</span>{% endif %}{% endif %}
             </p>
           </div>
         </div>
@@ -1258,7 +1294,19 @@
             {% if cert.error %}
             <div class="text-red-600 dark:text-red-400"><strong>Error:</strong> {{ cert.error }}</div>
             {% else %}
+            {% set icpt = cert.interception or {} %}
+            {% set intercepted = icpt.status == 'intercepted' %}
             <div class="space-y-1 text-sm dark:text-gray-300">
+              {% if intercepted %}
+              <div class="mb-2 p-2 rounded-md bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-300 dark:border-yellow-700">
+                <p class="text-yellow-800 dark:text-yellow-300 font-medium">🔀 Intercepted by a TLS-inspection proxy</p>
+                <p class="text-xs text-yellow-800 dark:text-yellow-300">{{ icpt.note }}. The details below are the proxy's certificate, not the site's.</p>
+                {% if icpt.real_issuer %}
+                <p class="mt-1"><strong>Real certificate (CT logs):</strong> issued by {{ icpt.real_issuer }}, valid to {{ icpt.real_not_after }}
+                  {% if icpt.crtsh_link %}&middot; <a href="{{ icpt.crtsh_link }}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">View on crt.sh</a>{% endif %}</p>
+                {% endif %}
+              </div>
+              {% endif %}
               <p><strong>Subject:</strong> {{ cert.subject_cn }}{% if cert.subject_org %} ({{ cert.subject_org }}){% endif %}</p>
               <p><strong>Issuer:</strong> {{ cert.issuer_cn }}{% if cert.issuer_org %} ({{ cert.issuer_org }}){% endif %}</p>
               <p><strong>Valid:</strong> {{ cert.not_before }} &rarr; {{ cert.not_after }}</p>
@@ -1266,8 +1314,14 @@
               {% if not cert.trusted %}
               <p class="text-red-600 dark:text-red-400">❌ Not trusted by the default certificate store</p>
               {% endif %}
-              {% if cert.warning %}
+              {# A proxy mints a fresh cert per connection, so its "issued N days ago" warning is noise. #}
+              {% if cert.warning and not (intercepted and cert.trusted) %}
               <p class="text-yellow-600 dark:text-yellow-400">⚠️ {{ cert.warning }}</p>
+              {% endif %}
+              {% if icpt.status == 'not_intercepted' %}
+              <p class="text-green-600 dark:text-green-400">✔️ {{ icpt.note }}</p>
+              {% elif icpt.status in ('unclear', 'unknown') %}
+              <p class="text-gray-500 dark:text-gray-400">❓ {{ icpt.note }}</p>
               {% endif %}
               <button
                 type="button"

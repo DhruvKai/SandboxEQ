@@ -26,6 +26,7 @@ from url_lookup import (
 )
 from ip_lookup import IPLookupTool, _is_valid_ip, normalize_ip
 import ioc_tools
+import revocation
 import subnet_tools
 import config_store
 from dotenv import load_dotenv
@@ -163,6 +164,10 @@ class ThreatAnalyzer:
         # GreyNoise IP is a mass scanner, which says little about whether it
         # is a threat to *this* network. Shown as cards, kept out of the score.
         'shodan_internetdb', 'greynoise',
+        # CIRCL hashlookup says whether a file is *known* (ships in a
+        # catalogued package), not whether it's clean - NSRL lists hacking
+        # tools too. Context for the analyst, not a vote.
+        'circl_hashlookup',
     }
 
     @staticmethod
@@ -259,10 +264,17 @@ class CompositeVerdict:
             category_confidence = 'none'
 
         cert = results.get('certificate') or {}
+        # Behind a TLS-inspection proxy the handshake is with the proxy's
+        # re-signed cert, so "trusted" says nothing about the real site.
+        # An *untrusted* result still fails: inspection proxies deliberately
+        # re-sign a bad origin cert with an untrusted CA to pass that on.
+        cert_intercepted = (cert.get('interception') or {}).get('status') == 'intercepted'
         if cert.get('error'):
             cert_status = 'unknown'
         elif not cert.get('trusted', True) or cert.get('expired'):
             cert_status = 'fail'
+        elif cert_intercepted:
+            cert_status = 'unknown'
         elif cert.get('warning'):
             cert_status = 'warn'
         else:
@@ -320,6 +332,7 @@ class CompositeVerdict:
             'category': category,
             'category_confidence': category_confidence,
             'cert_status': cert_status,
+            'cert_intercepted': cert_intercepted,
             'is_typosquat': is_typosquat,
             'favicon_confirms_clone': favicon_confirms_clone,
             'is_homoglyph': is_homoglyph,
@@ -1203,6 +1216,28 @@ async def ssl_labs_scan(hostname: str):
         raise HTTPException(status_code=502, detail=str(e))
     finally:
         await ssl_labs.close_session()
+
+
+@app.post("/api/cert-revocation")
+async def cert_revocation(request: Request):
+    """On-demand OCSP/CRL check for a certificate from the Digital
+    Certificate tab (which can't reach CA endpoints from the browser).
+    Body: {"leaf_der_b64": ..., "issuer_der_b64": ... (optional)}."""
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Expected a JSON body"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "Expected a JSON object"}, status_code=400)
+    try:
+        return await asyncio.wait_for(
+            revocation.check_revocation(payload.get("leaf_der_b64"), payload.get("issuer_der_b64")),
+            timeout=45,
+        )
+    except revocation.RevocationInputError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "Timed out waiting for the CA's revocation service"}, status_code=504)
 
 # --- Tools tab: offline subnet calculator + IOC extractor -------------------
 # Pure computation (no provider calls, no API keys), so plain sync handlers.

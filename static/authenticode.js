@@ -222,9 +222,23 @@
     };
   }
 
+  // GeneralName uniformResourceIdentifier is [6] IA5String - collect every
+  // one under `node` (CRL distribution points nest them a few levels deep).
+  function collectUris(node, out) {
+    if (node.tagClass === CLASS_CONTEXT && node.tagNum === 6 && !node.constructed) {
+      out.push(String.fromCharCode(...node.value));
+    } else if (node.constructed) {
+      for (const child of readChildren(node.value)) collectUris(child, out);
+    }
+    return out;
+  }
+
   function decodeExtensions(extensionsNode) {
     const ekus = [];
     let isCA = null;
+    const crlUrls = [];
+    const ocspUrls = [];
+    const caIssuerUrls = [];
     try {
       const extSeq = readChildren(extensionsNode.value)[0]; // SEQUENCE OF Extension
       for (const ext of readChildren(extSeq.value)) {
@@ -243,12 +257,28 @@
           const seq = parseTLV(octet.value);
           const kids = readChildren(seq.value);
           isCA = kids.length > 0 && kids[0].value.length > 0 && kids[0].value[0] !== 0;
+        } else if (extOid === '2.5.29.31') {
+          // cRLDistributionPoints
+          collectUris(parseTLV(octet.value), crlUrls);
+        } else if (extOid === '1.3.6.1.5.5.7.1.1') {
+          // authorityInfoAccess: SEQUENCE OF { accessMethod OID, accessLocation GeneralName }
+          for (const ad of readChildren(parseTLV(octet.value).value)) {
+            const [method, location] = readChildren(ad.value);
+            const target = { '1.3.6.1.5.5.7.48.1': ocspUrls, '1.3.6.1.5.5.7.48.2': caIssuerUrls }[decodeOid(method.value)];
+            if (target) collectUris(location, target);
+          }
         }
       }
     } catch (e) {
       /* best-effort */
     }
-    return { ekus, isCA };
+    return { ekus, isCA, crlUrls, ocspUrls, caIssuerUrls };
+  }
+
+  function bytesToBase64(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
   }
 
   async function parseCertificate(certNode) {
@@ -299,7 +329,9 @@
       /* best-effort */
     }
 
-    const { ekus, isCA } = extensionsNode ? decodeExtensions(extensionsNode) : { ekus: [], isCA: null };
+    const { ekus, isCA, crlUrls, ocspUrls, caIssuerUrls } = extensionsNode
+      ? decodeExtensions(extensionsNode)
+      : { ekus: [], isCA: null, crlUrls: [], ocspUrls: [], caIssuerUrls: [] };
 
     const der = certNode.raw;
     const [thumbSha1, thumbSha256] = await Promise.all([
@@ -313,10 +345,11 @@
       publicKeyAlgorithm: spkiAlgOid === '1.2.840.113549.1.1.1' ? 'RSA'
         : spkiAlgOid === '1.2.840.10045.2.1' ? 'ECDSA' : spkiAlgOid,
       publicKeyBits: keyBits,
-      ekus, isCA,
+      ekus, isCA, crlUrls, ocspUrls, caIssuerUrls,
       thumbprintSha1: thumbSha1,
       thumbprintSha256: thumbSha256,
       issuerAndSerialKey: issuer.string + '|' + serialHex,
+      derB64: bytesToBase64(der), // for the backend revocation check
     };
   }
 
@@ -539,6 +572,7 @@
         time: genTime || (tsSigner && tsSigner.signingTime) || null,
         signerCert: tsSigner ? tsSigner.cert : null,
         digestAlgorithm: tsSigner ? tsSigner.digestAlgorithm : null,
+        certs: tsCerts, // the TSA's own chain - lives in the token, not the outer SignedData
       };
     }
 
@@ -593,7 +627,185 @@
       }
     }
 
-    return { pe32, checksumOff, secDirEntryOff, secVA, secSize, blobs };
+    // Section table + resource directory (index 2) - only needed for the
+    // version-info read below, so a malformed table just yields no sections.
+    const sections = [];
+    try {
+      const numberOfSections = dv.getUint16(coffOff + 2, true);
+      const sectionTableOff = optOff + sizeOfOptionalHeader;
+      for (let i = 0; i < numberOfSections && i < 96; i++) {
+        const s = sectionTableOff + i * 40;
+        sections.push({
+          virtualSize: dv.getUint32(s + 8, true),
+          va: dv.getUint32(s + 12, true),
+          rawSize: dv.getUint32(s + 16, true),
+          rawPtr: dv.getUint32(s + 20, true),
+        });
+      }
+    } catch (e) {
+      /* best-effort */
+    }
+    const numberOfRvaAndSizes = dv.getUint32(dataDirOff - 4, true);
+    const rsrcRva = numberOfRvaAndSizes > 2 ? dv.getUint32(dataDirOff + 2 * 8, true) : 0;
+
+    return { pe32, checksumOff, secDirEntryOff, secVA, secSize, blobs, sections, rsrcRva };
+  }
+
+  // ===================== PE version info (VS_VERSIONINFO) =====================
+
+  function rvaToOffset(peMeta, rva) {
+    for (const s of peMeta.sections) {
+      if (rva >= s.va && rva < s.va + Math.max(s.virtualSize, s.rawSize)) {
+        const off = s.rawPtr + (rva - s.va);
+        return off < s.rawPtr + s.rawSize ? off : -1;
+      }
+    }
+    return -1;
+  }
+
+  function readUtf16z(bytes, off, end) {
+    let s = '';
+    while (off + 1 < end) {
+      const c = bytes[off] | (bytes[off + 1] << 8);
+      off += 2;
+      if (!c) break;
+      s += String.fromCharCode(c);
+    }
+    return [s, off];
+  }
+
+  const align4 = (off) => (off + 3) & ~3;
+
+  // One node of the VS_VERSIONINFO tree: wLength, wValueLength, wType,
+  // szKey (UTF-16, NUL-terminated), padding, Value, padding, Children.
+  function readVersionBlock(bytes, dv, off, limit) {
+    const length = dv.getUint16(off, true);
+    const valueLength = dv.getUint16(off + 2, true);
+    const type = dv.getUint16(off + 4, true);
+    const end = Math.min(off + length, limit);
+    if (length < 6 || end <= off) return null;
+    const [key, afterKey] = readUtf16z(bytes, off + 6, end);
+    const valueOff = align4(afterKey);
+    const childOff = align4(valueOff + (type === 1 ? valueLength * 2 : valueLength));
+    return { key, valueOff, childOff, end };
+  }
+
+  function versionChildren(bytes, dv, block) {
+    const out = [];
+    let pos = block.childOff;
+    while (pos + 6 <= block.end) {
+      const child = readVersionBlock(bytes, dv, pos, block.end);
+      if (!child) break;
+      out.push(child);
+      pos = align4(child.end);
+    }
+    return out;
+  }
+
+  const VERSION_FIELDS = ['CompanyName', 'ProductName', 'FileDescription', 'OriginalFilename',
+    'InternalName', 'FileVersion', 'LegalCopyright'];
+
+  // The publisher/product strings a PE declares about itself (what Explorer
+  // shows under Properties > Details). Returns null when there are none;
+  // never throws - a malformed resource must not break signature analysis.
+  function parseVersionInfo(bytes, peMeta) {
+    try {
+      if (!peMeta.rsrcRva) return null;
+      const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const rsrcOff = rvaToOffset(peMeta, peMeta.rsrcRva);
+      if (rsrcOff < 0) return null;
+
+      // IMAGE_RESOURCE_DIRECTORY: named + ID entry counts at +12/+14, then
+      // 8-byte entries {Name/Id, OffsetToData}; high bit = subdirectory.
+      const entries = (dirOff) => {
+        const count = dv.getUint16(dirOff + 12, true) + dv.getUint16(dirOff + 14, true);
+        const out = [];
+        for (let i = 0; i < count && i < 4096; i++) {
+          const e = dirOff + 16 + i * 8;
+          out.push({ id: dv.getUint32(e, true), target: dv.getUint32(e + 4, true) });
+        }
+        return out;
+      };
+      const RT_VERSION = 16;
+      const typeEntry = entries(rsrcOff).find((e) => e.id === RT_VERSION);
+      if (!typeEntry || !(typeEntry.target & 0x80000000)) return null;
+      const nameEntry = entries(rsrcOff + (typeEntry.target & 0x7fffffff))[0];
+      if (!nameEntry || !(nameEntry.target & 0x80000000)) return null;
+      const langEntry = entries(rsrcOff + (nameEntry.target & 0x7fffffff))[0];
+      if (!langEntry || (langEntry.target & 0x80000000)) return null;
+      const dataEntryOff = rsrcOff + langEntry.target; // IMAGE_RESOURCE_DATA_ENTRY
+      const dataOff = rvaToOffset(peMeta, dv.getUint32(dataEntryOff, true));
+      const dataSize = dv.getUint32(dataEntryOff + 4, true);
+      if (dataOff < 0) return null;
+
+      const root = readVersionBlock(bytes, dv, dataOff, Math.min(dataOff + dataSize, bytes.length));
+      if (!root || root.key !== 'VS_VERSION_INFO') return null;
+
+      const info = {};
+      for (const sfi of versionChildren(bytes, dv, root).filter((b) => b.key === 'StringFileInfo')) {
+        for (const table of versionChildren(bytes, dv, sfi)) {
+          for (const str of versionChildren(bytes, dv, table)) {
+            if (VERSION_FIELDS.includes(str.key) && !(str.key in info)) {
+              const value = readUtf16z(bytes, str.valueOff, str.end)[0].trim();
+              if (value) info[str.key] = value;
+            }
+          }
+        }
+      }
+      return Object.keys(info).length ? info : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Words that say nothing about *which* company it is - two unrelated
+  // "... Software Ltd" names must not count as a match.
+  const GENERIC_NAME_WORDS = new Set([
+    'inc', 'incorporated', 'corp', 'corporation', 'company', 'ltd', 'limited', 'llc', 'llp',
+    'gmbh', 'plc', 'srl', 'spa', 'pty', 'pte', 'the', 'and', 'software', 'technologies',
+    'technology', 'systems', 'solutions', 'foundation', 'group', 'holdings', 'international',
+    'labs', 'digital', 'global', 'services', 'network', 'networks', 'studio', 'studios',
+    'games', 'project', 'team', 'development', 'computer', 'computers', 'data', 'media',
+  ]);
+
+  function nameTokens(name) {
+    return (name || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ')
+      .filter((t) => t.length >= 3 && !GENERIC_NAME_WORDS.has(t));
+  }
+
+  // Browsers save a re-download as "setup (1).exe"; that's not a rename.
+  function canonicalFileName(name) {
+    return (name || '').toLowerCase().replace(/\.mui$/, '').replace(/ \(\d+\)(?=\.[^.]+$)/, '');
+  }
+
+  // Does the publisher the file claims (CompanyName) agree with who signed
+  // it, and is the file still called what it was built as? A file claiming
+  // "Microsoft Corporation" but signed by someone else, or a renamed tool
+  // (OriginalFilename "psexec.exe" saved as "update.exe"), is a classic
+  // disguise. "differs" is a prompt to review, not proof: a foundation
+  // signing a project's builds (OpenJS Foundation / "Node.js") differs too.
+  function publisherCheck(versionInfo, leaf, fileName) {
+    const signer = leaf ? (leaf.subject.attrs.O || leaf.subject.cn) : null;
+    const company = versionInfo && versionInfo.CompanyName;
+    let status = 'no-company';
+    if (company && signer) {
+      const signerTokens = new Set(nameTokens(signer));
+      const joined = (s) => nameTokens(s).join('');
+      const shared = nameTokens(company).some((t) => signerTokens.has(t));
+      const contained = joined(company) && joined(signer)
+        && (joined(company).includes(joined(signer)) || joined(signer).includes(joined(company)));
+      status = shared || contained ? 'match' : 'differs';
+    }
+
+    const original = versionInfo && versionInfo.OriginalFilename;
+    let renamed = false;
+    if (original && fileName) {
+      const a = canonicalFileName(original);
+      const b = canonicalFileName(fileName);
+      const stem = (s) => s.replace(/\.[^.]+$/, '');
+      renamed = a !== b && stem(a) !== stem(b);
+    }
+    return { status, company, signer, renamed, originalFilename: original };
   }
 
   // Recomputes the Authenticode "page hash" over the whole file, excluding
@@ -935,6 +1147,7 @@
     }
     report.fileType = 'PE';
     report.architecture = peMeta.pe32 ? 'PE32 (32-bit)' : 'PE32+ (64-bit)';
+    report.versionInfo = parseVersionInfo(bytes, peMeta);
 
     if (!peMeta.blobs.length) return report;
     report.signed = true;
@@ -1193,21 +1406,32 @@
     return dn ? dn.cn || dn.string || 'Unknown' : 'Unknown';
   }
 
+  // "Copy certificate summary" copies both sections (signer cert, then its
+  // timestamp); "Copy timestamp summary" copies just the second one.
   function certSummaryText(sig) {
     const leaf = sig.leaf;
     return [
-      `Signer: ${leaf ? nameOf(leaf.subject) : 'Unknown'}`,
-      `Issuer (CA): ${leaf ? nameOf(leaf.issuer) : 'Unknown'}`,
+      'Certificate Information',
+      `Name of signer: ${leaf ? nameOf(leaf.subject) : 'Unknown'}`,
+      `CA: ${leaf ? nameOf(leaf.issuer) : 'Unknown'}`,
+      `Valid from: ${(leaf && fmtDateShort(leaf.notBefore)) || 'Unknown'}`,
       `Valid to: ${(leaf && fmtDateShort(leaf.notAfter)) || 'Unknown'}`,
+      '',
+      timestampSummaryText(sig.timestamp),
     ].join('\n');
   }
 
   function timestampSummaryText(ts) {
+    if (!ts || !ts.time) {
+      return ['Timestamp Information', ts && ts.error ? `Unreadable: ${ts.error}` : 'None'].join('\n');
+    }
     const tsa = ts.signerCert;
     return [
+      'Timestamp Information',
       `Timestamped at: ${fmtDate(ts.time) || 'Unknown'}`,
-      `Timestamp authority: ${tsa ? nameOf(tsa.subject) : 'Unknown'}`,
-      `Issuer (CA): ${tsa ? nameOf(tsa.issuer) : 'Unknown'}`,
+      `Name of signer: ${tsa ? nameOf(tsa.subject) : 'Unknown'}`,
+      `CA: ${tsa ? nameOf(tsa.issuer) : 'Unknown'}`,
+      `Valid from: ${(tsa && fmtDateShort(tsa.notBefore)) || 'Unknown'}`,
       `Valid to: ${(tsa && fmtDateShort(tsa.notAfter)) || 'Unknown'}`,
     ].join('\n');
   }
@@ -1216,6 +1440,59 @@
   // Newlines are entity-encoded so the multi-line text survives the attribute.
   function copySummaryButton(text, label) {
     return `<button type="button" data-copy="${escapeHtml(text).replace(/\n/g, '&#10;')}" title="${escapeHtml(label)}" class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium bg-white dark:bg-gray-800 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-700 rounded-md hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors">📋 ${escapeHtml(label)}</button>`;
+  }
+
+  // On-demand OCSP/CRL check - the browser can't fetch CA endpoints itself
+  // (CORS), so the delegated [data-revocation] listener in index.html posts
+  // this payload to /api/cert-revocation. Everything it needs rides in the
+  // attribute so it also works on a report restored from sessionStorage.
+  // `refTime` is when the signature was made (the timestamp), which decides
+  // how bad a revocation is - see renderRevocation().
+  function revocationButton(cert, candidateIssuers, refTime) {
+    if (!cert || !cert.derB64) return '';
+    const issuer = (candidateIssuers || []).find((c) => c !== cert && c.subject.string === cert.issuer.string);
+    const payload = {
+      leaf_der_b64: cert.derB64,
+      issuer_der_b64: issuer ? issuer.derB64 : null,
+      ref_time: refTime ? refTime.toISOString() : null,
+      expired: !!(cert.notAfter && new Date() > cert.notAfter),
+    };
+    return `
+      <div class="pt-1">
+        <button type="button" data-revocation="${escapeHtml(JSON.stringify(payload))}" class="text-xs px-2 py-1 bg-white dark:bg-gray-800 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-700 rounded hover:bg-indigo-100 dark:hover:bg-indigo-900">🛡️ Check revocation (OCSP/CRL)</button>
+        <div class="revocation-result text-sm mt-1"></div>
+      </div>`;
+  }
+
+  const SEVERE_REVOCATION_REASONS = ['keyCompromise', 'cACompromise', 'aACompromise', 'unspecified'];
+
+  // Microsoft's rule for timestamped code: a revocation dated *after* the
+  // signature's timestamp doesn't invalidate it - unless the key was
+  // compromised (or no reason was given), since then the timestamp itself
+  // can't be trusted to predate the compromise.
+  function renderRevocation(result, ctx) {
+    const reason = result.reason || 'unspecified';
+    const via = result.method ? ` via ${escapeHtml(result.method)}` : '';
+    if (result.status === 'good') {
+      const caveat = ctx.expired
+        ? '<p class="text-xs text-gray-500 dark:text-gray-400">The certificate has expired; CAs often stop listing expired certificates, so this is weaker evidence.</p>'
+        : '';
+      return `${badge(`✔️ Not revoked${via}`, 'green')}${caveat}`;
+    }
+    if (result.status === 'revoked') {
+      const revokedAt = result.revoked_at ? new Date(result.revoked_at) : null;
+      const refTime = ctx.ref_time ? new Date(ctx.ref_time) : null;
+      const afterSigning = revokedAt && refTime && revokedAt > refTime;
+      const when = revokedAt ? fmtDateShort(revokedAt) : 'unknown date';
+      if (afterSigning && !SEVERE_REVOCATION_REASONS.includes(reason)) {
+        return `${badge(`⚠️ Revoked ${escapeHtml(when)} (${escapeHtml(reason)})`, 'yellow')}
+          <p class="text-xs text-gray-600 dark:text-gray-400">Revoked after this file was timestamped (${escapeHtml(fmtDateShort(refTime))}), for a non-security reason, so the signature is still treated as valid.</p>`;
+      }
+      return `${badge(`🚨 Revoked ${escapeHtml(when)} (${escapeHtml(reason)})`, 'red')}
+        <p class="text-xs text-red-700 dark:text-red-300">The CA has withdrawn this certificate${SEVERE_REVOCATION_REASONS.includes(reason) && reason !== 'unspecified' ? ' because its key was compromised' : ''}. Do not trust this signature.</p>`;
+    }
+    const expiredNote = ctx.expired ? ' CAs often stop publishing revocation status for expired certificates.' : '';
+    return `${badge('❓ Status unknown', 'gray')}<p class="text-xs text-gray-600 dark:text-gray-400">${escapeHtml(result.note || '')}${expiredNote}</p>`;
   }
 
   // Same look as the Cert Information card, for the timestamp: when it was
@@ -1245,6 +1522,7 @@
         line('CA', tsa ? nameOf(tsa.issuer) : 'Unknown'),
         line('Valid to', (tsa && fmtDateShort(tsa.notAfter)) || 'Unknown'),
         line('Type', type),
+        revocationButton(tsa, (ts.certs || []).concat(sig.chain || []), ts.time),
       ].join(''), copySummaryButton(timestampSummaryText(ts), 'Copy timestamp summary'));
     }
     if (ts && ts.error) {
@@ -1254,7 +1532,25 @@
       '<p class="text-sm text-gray-900 dark:text-gray-100">No trusted timestamp - this signature can’t be trusted once the signing certificate expires.</p>');
   }
 
-  function conciseCard(sig, badMatch) {
+  function publisherLines(pub) {
+    if (!pub) return '';
+    const row = (html) => `<p class="text-sm text-gray-900 dark:text-gray-100"><strong>Publisher:</strong> ${html}</p>`;
+    let html;
+    if (pub.status === 'match') {
+      html = row(`✅ Matches signer <span class="text-xs text-gray-500 dark:text-gray-400">(file says “${escapeHtml(pub.company)}”)</span>`);
+    } else if (pub.status === 'differs') {
+      html = row(`⚠️ File says “${escapeHtml(pub.company)}”, signed by “${escapeHtml(pub.signer)}”`)
+        + '<p class="text-xs text-gray-500 dark:text-gray-400">Sometimes legitimate (e.g. a foundation signing a project’s builds), but a classic disguise - check the signer is who you expect.</p>';
+    } else {
+      html = row('<span class="text-gray-500 dark:text-gray-400">No company name in the file’s version info</span>');
+    }
+    if (pub.renamed) {
+      html += `<p class="text-sm text-gray-900 dark:text-gray-100"><strong>File name:</strong> ⚠️ Renamed - built as “${escapeHtml(pub.originalFilename)}”</p>`;
+    }
+    return html;
+  }
+
+  function conciseCard(sig, badMatch, pub) {
     const leaf = sig.leaf;
     const now = new Date();
     const expired = leaf && leaf.notAfter && now > leaf.notAfter;
@@ -1283,6 +1579,8 @@
         <p class="text-sm text-gray-900 dark:text-gray-100"><strong>Valid:</strong> ${escapeHtml(validStr)}</p>
         <p class="text-sm text-gray-900 dark:text-gray-100"><strong>CA:</strong> ${escapeHtml(leaf ? nameOf(leaf.issuer) : 'Unknown')}</p>
         <p class="text-sm text-gray-900 dark:text-gray-100 pt-1 mt-1 border-t border-indigo-200 dark:border-indigo-800"><strong>Integrity:</strong> ${integrityLabel}</p>
+        ${publisherLines(pub)}
+        ${revocationButton(leaf, sig.chain, sig.timestamp && sig.timestamp.time)}
       </div>`;
   }
 
@@ -1296,7 +1594,7 @@
       </div>`;
   }
 
-  function renderSignature(sig, index, total) {
+  function renderSignature(sig, index, total, report) {
     if (sig.error) {
       return `
         <div id="digicert-sig-${index}" class="border border-red-200 dark:border-red-800 rounded-lg p-4 bg-red-50 dark:bg-red-900/30">
@@ -1346,7 +1644,7 @@
           <span class="font-semibold text-sm">✍️ Signature ${index + 1}${total > 1 ? ` of ${total}` : ''} — ${escapeHtml(sig.digestAlgorithm || 'unknown')} digest</span>
         </div>
         <div class="p-4 space-y-4">
-          ${conciseCard(sig, badMatch)}
+          ${conciseCard(sig, badMatch, report.fileType === 'PE' ? publisherCheck(report.versionInfo, sig.leaf, report.fileName) : null)}
           ${timestampCard(sig)}
           ${knownBadBanner(badMatch)}
           <details class="group" open>
@@ -1396,6 +1694,24 @@
         ${fieldRow('File SHA-256 (whole file)', report.fileSha256, { mono: true })}
       </div>`);
 
+    // What the file says about itself (Properties > Details) - self-declared
+    // by whoever built it, so compared against the signer in each signature.
+    const vi = report.versionInfo;
+    if (vi) {
+      parts.push(`
+      <div class="bg-gray-50 dark:bg-gray-900/40 rounded-lg p-4 mb-4">
+        <p class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-1">File Information (self-declared)</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
+          ${fieldRow('Company', vi.CompanyName)}
+          ${fieldRow('Product', vi.ProductName)}
+          ${fieldRow('Description', vi.FileDescription)}
+          ${fieldRow('Original file name', vi.OriginalFilename)}
+          ${fieldRow('File version', vi.FileVersion)}
+          ${fieldRow('Copyright', vi.LegalCopyright)}
+        </div>
+      </div>`);
+    }
+
     if (report.error) {
       parts.push(`<div class="text-sm text-red-600 dark:text-red-400">${escapeHtml(report.error)}</div>`);
       return parts.join('');
@@ -1411,11 +1727,11 @@
     parts.push(embeddedSignaturesTable(report));
 
     parts.push('<div class="space-y-4">');
-    report.signatures.forEach((sig, i) => parts.push(renderSignature(sig, i, report.signatures.length)));
+    report.signatures.forEach((sig, i) => parts.push(renderSignature(sig, i, report.signatures.length, report)));
     parts.push('</div>');
 
     return parts.join('');
   }
 
-  global.AuthenticodeParser = { analyzeFile, renderReport };
+  global.AuthenticodeParser = { analyzeFile, renderReport, renderRevocation };
 })(window);

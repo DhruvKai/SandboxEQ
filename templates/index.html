@@ -984,9 +984,10 @@
       }
 
       // Delegated handlers for the Digital Certificate tab's dynamically
-      // rendered buttons - copy-field (data-copy) and CSV export
-      // (data-csv-b64), which use data attributes instead of an inline
-      // onclick like the server-rendered copy-btn's elsewhere.
+      // rendered buttons - copy-field (data-copy), CSV export
+      // (data-csv-b64) and revocation check (data-revocation), which use
+      // data attributes instead of an inline onclick like the
+      // server-rendered copy-btn's elsewhere.
       document.addEventListener("click", (event) => {
         const copyBtn = event.target.closest("[data-copy]");
         if (copyBtn) {
@@ -998,8 +999,33 @@
           const csv = decodeURIComponent(escape(atob(csvBtn.dataset.csvB64)));
           const filename = csvBtn.dataset.csvFilename || "certificate-report.csv";
           exportCsv(csv, filename);
+          return;
         }
+        const revocationBtn = event.target.closest("[data-revocation]");
+        if (revocationBtn) checkRevocation(revocationBtn);
       });
+
+      async function checkRevocation(btn) {
+        const out = btn.parentElement.querySelector(".revocation-result");
+        const ctx = JSON.parse(btn.dataset.revocation);
+        btn.disabled = true;
+        out.textContent = "Asking the CA (OCSP / CRL)...";
+        try {
+          const response = await fetch("/api/cert-revocation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ leaf_der_b64: ctx.leaf_der_b64, issuer_der_b64: ctx.issuer_der_b64 }),
+          });
+          const result = await response.json();
+          out.innerHTML = response.ok
+            ? window.AuthenticodeParser.renderRevocation(result, ctx)
+            : `<span class="text-red-600 dark:text-red-400">Could not check: ${escHtml(result.error || response.statusText)}</span>`;
+        } catch (err) {
+          out.innerHTML = `<span class="text-red-600 dark:text-red-400">Could not check: ${escHtml(err.message)}</span>`;
+        } finally {
+          btn.disabled = false;
+        }
+      }
 
       // Saves + opens the CSV natively when running inside the desktop app
       // (window.pywebview.api, see desktop_app.py's Api.export_csv - it

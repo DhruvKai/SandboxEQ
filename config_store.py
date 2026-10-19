@@ -88,6 +88,11 @@ CHECKPHISH_API_KEY=
 # AbuseIPDB API Key (hosting IP reputation) - https://www.abuseipdb.com/register
 ABUSEIPDB_API_KEY=
 
+# (Optional, not an API key) Regex of TLS-inspection proxy issuer names, used
+# by the TLS Certificate card to spot re-signed certificates. Add your
+# company's inspection CA name if it isn't caught, e.g.:
+# TLS_INTERCEPT_ISSUER_HINTS=Palo Alto|Prisma|Forward.?Trust|Zscaler|Netskope|Fortinet|Fortigate|Contoso
+
 # --- IP lookup ---
 
 # GreyNoise API Key (OPTIONAL - the community endpoint works without one,

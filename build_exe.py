@@ -34,6 +34,8 @@ PyInstaller.__main__.run([
     '--hidden-import=ip_lookup',
     '--hidden-import=ioc_tools',
     '--hidden-import=subnet_tools',
+    '--hidden-import=revocation',
+    '--hidden-import=cryptography',
     '--hidden-import=truststore',
     '--hidden-import=webview',
     '--collect-all=webview',
